@@ -157,4 +157,4 @@ class TeraboxResolver:
 
             # No safe direct file link found
             return None, None, None
-            
+                    
