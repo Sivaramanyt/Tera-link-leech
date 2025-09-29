@@ -50,13 +50,17 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
         h["Range"] = range_hdr
     return h
 
-CHUNK = 1 * 1024 * 1024  # 1 MiB chunks
+CHUNK = 1 * 1024 * 1024  # 1 MiB
 
-async def fetch_to_temp(meta: FileMeta, timeout: int = 240) -> tuple[str, FileMeta]:
+async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) -> tuple[str, FileMeta]:
+    """
+    Download to a temp file with CDN-friendly headers and ranged GET.
+    on_progress: optional callable(done_bytes:int, total_bytes:int|0)
+    """
     url = meta.url
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Probe with tiny range GET to discover size/name without HEAD (some CDNs 403 on HEAD)
+        # Probe with a tiny range GET to discover size and prevent HEAD 403
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -95,16 +99,25 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240) -> tuple[str, FileMe
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
-        # If size unknown, fall back to single GET stream
+        # If size unknown, single stream GET
         if size is None:
+            written = 0
             r = await client.get(url, headers=_headers_for(url))
             r.raise_for_status()
             with open(path, "wb") as f:
                 async for chunk in r.aiter_bytes():
                     f.write(chunk)
+                    written += len(chunk)
+                    if on_progress:
+                        try:
+                            on_progress(written, 0)
+                        except Exception:
+                            pass
+            if meta.size is None and written > 0:
+                meta.size = written
             return path, meta
 
-        # Range download loop
+        # Ranged download
         parts = math.ceil(size / CHUNK)
         written = 0
         with open(path, "wb") as f:
@@ -121,6 +134,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240) -> tuple[str, FileMe
                             continue
                         f.write(rr.content)
                         written += len(rr.content)
+                        if on_progress:
+                            try:
+                                on_progress(written, size)
+                            except Exception:
+                                pass
                         last_err = None
                         break
                     except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError) as e:
@@ -133,4 +151,3 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240) -> tuple[str, FileMe
             meta.size = written
 
         return path, meta
-    
