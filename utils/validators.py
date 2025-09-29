@@ -6,24 +6,22 @@ _TB_HOSTS = {
     "terabox.com", "www.terabox.com",
     "nephobox.com", "www.nephobox.com",
     "4funbox.com", "www.4funbox.com",
-    "tibx.cc", "www.tibx.cc",  # common shorteners
+    "tibx.cc", "www.tibx.cc",
     "teraboxapp.com", "www.teraboxapp.com",
 }
 
 def is_terabox_url(raw: str) -> bool:
-    # Normalize slashes and strip spaces
+    if not raw:
+        return False
     s = raw.strip().replace("\\", "/")
+    if not s.lower().startswith(("http://", "https://")):
+        s = "https://" + s  # tolerate schema-less paste
     try:
         u = urlparse(s)
         host = (u.netloc or "").lower()
-        if host in _TB_HOSTS:
-            return True
-        # Accept t.me/clickable text where schema is missing
-        if not u.scheme and any(h in s.lower() for h in _TB_HOSTS):
-            return True
+        return any(host.endswith(h) for h in _TB_HOSTS)
     except Exception:
-        pass
-    return False
+        return False
 
 def sanitize_filename(name: str) -> str:
     return re.sub(r"[^\w\-. ]", "_", name)
