@@ -88,4 +88,4 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 180) -> tuple[str, FileMe
             meta.size = written
 
         return path, meta
-                                 
+                
