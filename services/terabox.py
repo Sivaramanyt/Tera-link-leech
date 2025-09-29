@@ -1,13 +1,13 @@
 # services/terabox.py
 import asyncio
-import re
 import json
 import httpx
+import re
 from urllib.parse import urlparse, parse_qs
 from tenacity import retry, stop_after_attempt, wait_fixed
 from services.downloader import FileMeta
 
-# Optional external lib
+# Optional external helper if later added
 try:
     from terabox_linker import get_direct_link  # type: ignore
 except Exception:
@@ -15,12 +15,27 @@ except Exception:
 
 _PAGE_DATA_RE = re.compile(r"window\.pageData\s*=\s*(\{.*?\});", re.DOTALL)
 
+API_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "application/json, text/plain, */*",
+    "Content-Type": "application/json;charset=UTF-8",
+    "Referer": "https://www.terabox.com/",
+}
+
+HTML_HEADERS = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.terabox.com/",
+}
+
 class TeraboxResolver:
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     async def resolve(self, share_url: str) -> FileMeta:
+        # Try optional third-party helper first
         url, name, size = await self._with_lib(share_url)
         if not url:
-            url, name, size = await self._resolve_terabox_or_1024(share_url)
+            # Use API-first flow modeled after Mirror-Leech implementations
+            url, name, size = await self._api_first_flow(share_url)
         if not url:
             raise RuntimeError("Unable to resolve direct link")
         return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
@@ -35,21 +50,20 @@ class TeraboxResolver:
         except Exception:
             return None, None, None
 
-    async def _resolve_terabox_or_1024(self, share_url: str):
-        url = share_url.strip().replace("\\", "/")
-        base_headers = {
-            "User-Agent": "Mozilla/5.0",
-            "Referer": "https://www.terabox.com/",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        }
-        async with httpx.AsyncClient(headers=base_headers, follow_redirects=True, timeout=25) as client:
-            r = await client.get(url)
-            r.raise_for_status()
-            final_url = str(r.url)
-            html = r.text
-            host = urlparse(final_url).netloc.lower()
+    async def _api_first_flow(self, share_url: str):
+        raw = share_url.strip().replace("\\", "/")
+        async with httpx.AsyncClient(follow_redirects=True, timeout=25) as client:
+            # 0) Load landing to normalize domain and capture embedded JSON if present
+            r0 = await client.get(raw, headers=HTML_HEADERS)
+            r0.raise_for_status()
+            final = str(r0.url)
+            html = r0.text
+            host = urlparse(final).netloc.lower()
+            q = parse_qs(urlparse(final).query)
+            surl = (q.get("surl") or q.get("shorturl") or [None])[0]
+            pwd = (q.get("pwd") or q.get("password") or [None])[0]
 
-            # Path A: Official terabox pageData JSON has dlink
+            # A) Official terabox pageData JSON with dlink/name/size
             m = _PAGE_DATA_RE.search(html)
             if m:
                 try:
@@ -70,52 +84,37 @@ class TeraboxResolver:
                 except Exception:
                     pass
 
-            # Path B: 1024terabox/1024tera flow using share/list then transfer to get temp dlink
-            q = parse_qs(urlparse(final_url).query)
-            surl = (q.get("surl") or q.get("shorturl") or [None])[0]
-            pwd = (q.get("pwd") or q.get("password") or [None])[0]
+            # B) 1024tera/1024terabox: call list API then transfer API to get temp dlink
             if any(k in host for k in ["1024tera", "1024terabox"]) and surl:
-                api_list = f"https://www.1024tera.com/share/list?surl={surl}&page=1&pageSize=50"
+                list_ep = f"https://www.1024tera.com/share/list?surl={surl}&page=1&pageSize=50"
                 if pwd:
-                    api_list += f"&pwd={pwd}"
+                    list_ep += f"&pwd={pwd}"
                 try:
-                    jl = await client.get(api_list, headers={"Accept": "application/json"})
+                    jl = await client.get(list_ep, headers=API_HEADERS)
                     jl.raise_for_status()
-                    data = jl.json()
-                    files = data.get("list") or data.get("data") or data.get("files") or []
-                    if isinstance(files, list) and files:
-                        f0 = files[0]
-                        fs_id = f0.get("fs_id") or f0.get("fsid") or f0.get("id")
+                    payload = jl.json()
+                    items = payload.get("list") or payload.get("data") or payload.get("files") or []
+                    if isinstance(items, list) and items:
+                        f0 = items[0]
                         name = f0.get("server_filename") or f0.get("filename")
                         size = f0.get("size")
-                        # If list already contains dlink, use it
+                        # Use dlink if included
                         dlink = f0.get("dlink") or f0.get("url")
                         if dlink:
                             return dlink, name, size
-                        # Otherwise call transfer API to obtain temp direct link
-                        # Common endpoints seen in mirrors:
-                        # - /share/transfer {surl, fs_id}
-                        # - /share/transfer? s.t. JSON body
-                        # - /api/file/transfer
-                        transfer_candidates = [
+                        # Else call transfer to get temp link
+                        fs_id = f0.get("fs_id") or f0.get("fsid") or f0.get("id")
+                        body = {"surl": surl, "fs_id": fs_id}
+                        if pwd:
+                            body["pwd"] = pwd
+                        for ep in [
                             "https://www.1024tera.com/share/transfer",
                             "https://www.1024tera.com/api/file/transfer",
-                        ]
-                        payload = {"surl": surl, "fs_id": fs_id}
-                        if pwd: payload["pwd"] = pwd
-                        for ep in transfer_candidates:
+                        ]:
                             try:
-                                jt = await client.post(
-                                    ep,
-                                    headers={
-                                        "Accept": "application/json, text/plain, */*",
-                                        "Content-Type": "application/json;charset=UTF-8",
-                                    },
-                                    json=payload,
-                                )
+                                jt = await client.post(ep, headers=API_HEADERS, json=body)
                                 if jt.status_code == 200:
                                     jd = jt.json()
-                                    # Look for direct url fields
                                     cand = (
                                         jd.get("dlink")
                                         or jd.get("url")
@@ -129,18 +128,9 @@ class TeraboxResolver:
                 except Exception:
                     pass
 
-            # Path C: as a very last resort, try to follow non-terabox CDN redirect and head it
-            try:
-                if final_url and "terabox" not in final_url:
-                    h = await client.head(final_url)
-                    size = int(h.headers.get("content-length") or 0) or None
-                    cd = h.headers.get("content-disposition", "")
-                    name = None
-                    if "filename=" in cd:
-                        name = cd.split("filename=")[-1].strip('\"; ')
-                    return final_url, name, size
-            except Exception:
-                pass
+            # C) Last resort: if final URL is already a CDN (not terabox host), use it
+            if final and "terabox" not in urlparse(final).netloc.lower():
+                return final, None, None
 
         return None, None, None
-            
+                    
