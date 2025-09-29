@@ -10,7 +10,7 @@ from telegram.ext import ContextTypes, CommandHandler
 from services.terabox import TeraboxResolver
 from services.downloader import fetch_to_temp
 
-# ---------------- Utilities ----------------
+# --------------- Formatting helpers ---------------
 def _fmt_size(n: int | None) -> str:
     if n is None:
         return "unknown"
@@ -36,7 +36,7 @@ def _fmt_eta(sec: float) -> str:
         return f"{m}m{s}s"
     return f"{s}s"
 
-# ---------------- Media send helper ----------------
+# --------------- Media sender ---------------
 async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: str, filename: str):
     mime, _ = guess_type(filename)
     ext = (os.path.splitext(filename)[1] or "").lower()
@@ -72,10 +72,10 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
         caption=f"📄 Name: {filename}",
     )
 
-# ---------------- Resolver ----------------
+# --------------- Resolver ---------------
 resolver_v2 = TeraboxResolver()
 
-# ---------------- Enhanced handler with emoji progress ----------------
+# --------------- Enhanced handler with real-time progress ---------------
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.effective_message.text or ""
@@ -100,26 +100,30 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     start = time.time()
     running = True
-    path_holder = {}
+
+    # Realtime counters from downloader callback
+    bytes_done = 0
+
+    def _on_progress(done, total_hint):
+        nonlocal bytes_done, total
+        bytes_done = int(done)
+        if not total and total_hint:
+            try:
+                total = int(total_hint)
+            except Exception:
+                pass
 
     async def progress_loop(message_id: int):
         while running:
             try:
-                done = 0
-                pth = path_holder.get("path")
-                if pth and os.path.exists(pth):
-                    try:
-                        done = os.path.getsize(pth)
-                    except Exception:
-                        done = 0
+                done = bytes_done
                 p = (done / total) if total and total > 0 else 0.0
                 bar = _progress_bar(p)
                 elapsed = max(0.001, time.time() - start)
                 speed = done / elapsed
                 eta = (total - done) / speed if total and speed > 0 else 0
-
                 text = (
-                    f"🟩 Download: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"📥 Download: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"🧮 {bar} {p*100:0.2f}%\n"
                     f"📦 Processed: {_fmt_size(done)}\n"
                     f"🗂️ Size: {_fmt_size(total)}\n"
@@ -136,15 +140,14 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Download and upload
     temp_path = None
     try:
-        await status.edit_text("⬇️ Downloading...")
-        temp_path, meta = await fetch_to_temp(meta)
-        path_holder["path"] = temp_path
+        await status.edit_text("⬇️ Starting download...")
+        temp_path, meta = await fetch_to_temp(meta, on_progress=_on_progress)
 
-        # Stop looping and show final summary
+        # Stop loop, show final, then upload
         running = False
         await asyncio.sleep(0)
 
-        done = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
+        done = bytes_done
         final = (
             f"✅ Completed\n"
             f"📄 Name: {title}\n"
@@ -179,11 +182,9 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-# Backward-compat alias so existing imports keep working:
-# from handlers.leech import leech_handler
+# Backward-compat alias to keep old import name working
 leech_handler = leech_handler_v2
 
-# Optional factory if your app registers handlers via a getter
 def get_enhanced_handler():
     return CommandHandler("leech", leech_handler_v2)
     
