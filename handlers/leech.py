@@ -1,4 +1,5 @@
-# ======================= Enhanced Leech Handler (keep existing code) =======================
+# handlers/leech.py
+
 import os
 import time
 import asyncio
@@ -9,7 +10,7 @@ from telegram.ext import ContextTypes, CommandHandler
 from services.terabox import TeraboxResolver
 from services.downloader import fetch_to_temp
 
-# ---- Formatting helpers ----
+# ---------------- Utilities ----------------
 def _fmt_size(n: int | None) -> str:
     if n is None:
         return "unknown"
@@ -35,27 +36,46 @@ def _fmt_eta(sec: float) -> str:
         return f"{m}m{s}s"
     return f"{s}s"
 
-# ---- Media upload chooser ----
+# ---------------- Media send helper ----------------
 async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: str, filename: str):
     mime, _ = guess_type(filename)
     ext = (os.path.splitext(filename)[1] or "").lower()
-    if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v"):
-        await context.bot.send_video(chat_id=chat_id, video=open(path, "rb"),
-                                     caption=f"📄 Name: {filename}", supports_streaming=True)
-        return
-    if (mime and mime.startswith("audio/")) or ext in (".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"):
-        await context.bot.send_audio(chat_id=chat_id, audio=open(path, "rb"),
-                                     caption=f"📄 Name: {filename}")
-        return
-    if (mime and mime.startswith("image/")) or ext in (".jpg", ".jpeg", ".png", ".webp"):
-        await context.bot.send_photo(chat_id=chat_id, photo=open(path, "rb"),
-                                     caption=f"📄 Name: {filename}")
-        return
-    await context.bot.send_document(chat_id=chat_id, document=open(path, "rb"),
-                                    caption=f"📄 Name: {filename}")
 
+    if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v"):
+        await context.bot.send_video(
+            chat_id=chat_id,
+            video=open(path, "rb"),
+            caption=f"📄 Name: {filename}",
+            supports_streaming=True,
+        )
+        return
+
+    if (mime and mime.startswith("audio/")) or ext in (".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"):
+        await context.bot.send_audio(
+            chat_id=chat_id,
+            audio=open(path, "rb"),
+            caption=f"📄 Name: {filename}",
+        )
+        return
+
+    if (mime and mime.startswith("image/")) or ext in (".jpg", ".jpeg", ".png", ".webp"):
+        await context.bot.send_photo(
+            chat_id=chat_id,
+            photo=open(path, "rb"),
+            caption=f"📄 Name: {filename}",
+        )
+        return
+
+    await context.bot.send_document(
+        chat_id=chat_id,
+        document=open(path, "rb"),
+        caption=f"📄 Name: {filename}",
+    )
+
+# ---------------- Resolver ----------------
 resolver_v2 = TeraboxResolver()
 
+# ---------------- Enhanced handler with emoji progress ----------------
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.effective_message.text or ""
@@ -63,9 +83,10 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts) < 2:
         await context.bot.send_message(chat_id, "Usage: /leech <terabox_share_url>")
         return
+
     share_url = parts[1].replace("\\", "/").strip()
 
-    # Initial message
+    # Initial status
     status = await context.bot.send_message(chat_id, "🔎 Resolving Terabox link...")
     try:
         meta = await resolver_v2.resolve(share_url)
@@ -96,6 +117,7 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elapsed = max(0.001, time.time() - start)
                 speed = done / elapsed
                 eta = (total - done) / speed if total and speed > 0 else 0
+
                 text = (
                     f"🟩 Download: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"🧮 {bar} {p*100:0.2f}%\n"
@@ -118,9 +140,10 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temp_path, meta = await fetch_to_temp(meta)
         path_holder["path"] = temp_path
 
-        # Stop progress loop and show final
+        # Stop looping and show final summary
         running = False
         await asyncio.sleep(0)
+
         done = os.path.getsize(temp_path) if os.path.exists(temp_path) else 0
         final = (
             f"✅ Completed\n"
@@ -156,7 +179,11 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+# Backward-compat alias so existing imports keep working:
+# from handlers.leech import leech_handler
+leech_handler = leech_handler_v2
+
+# Optional factory if your app registers handlers via a getter
 def get_enhanced_handler():
-    # Register this in your Application builder in addition to the existing handler if desired
     return CommandHandler("leech", leech_handler_v2)
-# ===================== End Enhanced Leech Handler (additive) =====================
+    
