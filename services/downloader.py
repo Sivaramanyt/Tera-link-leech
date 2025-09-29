@@ -3,8 +3,10 @@ import os
 import math
 import tempfile
 import httpx
+import asyncio
 from urllib.parse import urlparse, unquote
 from dataclasses import dataclass
+from typing import Optional
 
 @dataclass
 class FileMeta:
@@ -50,17 +52,110 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
         h["Range"] = range_hdr
     return h
 
-CHUNK = 1 * 1024 * 1024  # 1 MiB
+# Parallel segmented downloader settings
+DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "4"))  # tune 3–6 based on bandwidth
+MIN_CHUNK = 256 * 1024
+START_CHUNK = 512 * 1024
+
+async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int,
+                       headers_fn, attempt_chunk: int, on_progress, total_size: int,
+                       fhandle, write_offset: int):
+    """
+    Fetch a byte range [start, end] with retries; write directly at correct offset.
+    Resumes inside the range on partial responses and halves chunk size on errors.
+    """
+    cur_start = start
+    cur_chunk = attempt_chunk
+    while cur_start <= end:
+        cur_end = min(end, cur_start + cur_chunk - 1)
+        try:
+            rr = await client.get(url, headers=headers_fn(f"bytes={cur_start}-{cur_end}"))
+            if rr.status_code not in (200, 206):
+                raise RuntimeError(f"HTTP {rr.status_code}")
+            data = rr.content
+            if not data:
+                raise httpx.ReadError("empty body")
+
+            # Write at the proper position
+            fhandle.seek(write_offset + (cur_start - start))
+            fhandle.write(data)
+
+            if on_progress:
+                try:
+                    # fhandle.tell() reflects the current pointer, not total; compute done bytes:
+                    done_bytes = min(total_size, write_offset + (cur_start - start) + len(data))
+                    on_progress(done_bytes, total_size)
+                except Exception:
+                    pass
+
+            got = len(data)
+            cur_start += got
+            continue
+
+        except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError):
+            # Reduce chunk and retry a bit later
+            cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
+            await asyncio.sleep(0.5)
+            if cur_chunk <= MIN_CHUNK:
+                # final attempt
+                rr = await client.get(url, headers=headers_fn(f"bytes={cur_start}-{cur_end}"))
+                if rr.status_code in (200, 206) and rr.content:
+                    data = rr.content
+                    fhandle.seek(write_offset + (cur_start - start))
+                    fhandle.write(data)
+                    if on_progress:
+                        try:
+                            done_bytes = min(total_size, write_offset + (cur_start - start) + len(data))
+                            on_progress(done_bytes, total_size)
+                        except Exception:
+                            pass
+                    cur_start += len(data)
+                    continue
+                raise
+
+async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path: str,
+                            headers_fn, on_progress=None, workers: Optional[int] = None):
+    """
+    Download file in parallel byte ranges to 'path' with up to 'workers' tasks.
+    """
+    workers = workers or DEFAULT_MAX_WORKERS
+
+    # Pre-allocate the file
+    with open(path, "wb") as f:
+        f.truncate(size)
+
+    # Build segments (balanced by estimated size)
+    base_seg = max(START_CHUNK * 8, size // max(1, workers * 16))
+    segments = []
+    s = 0
+    while s < size:
+        e = min(size - 1, s + base_seg - 1)
+        segments.append((s, e))
+        s = e + 1
+
+    async def worker(idx: int, start: int, end: int):
+        # Separate handle to avoid seek contention
+        with open(path, "r+b") as f:
+            await _fetch_range(client, url, start, end, headers_fn, START_CHUNK, on_progress, size, f, start)
+
+    # Semaphore to cap concurrency
+    sem = asyncio.Semaphore(workers)
+
+    async def run_seg(i, rng):
+        async with sem:
+            await worker(i, rng[0], rng[1])
+
+    await asyncio.gather(*(run_seg(i, rng) for i, rng in enumerate(segments)))
 
 async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) -> tuple[str, FileMeta]:
     """
-    Download to a temp file with CDN-friendly headers and ranged GET.
+    Download to a temp file with CDN-friendly headers and parallel ranged GET.
     on_progress: optional callable(done_bytes:int, total_bytes:int|0)
     """
     url = meta.url
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Probe with a tiny range GET to discover size and prevent HEAD 403
+        # Probe with a tiny range GET to discover size and avoid HEAD 403
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -95,11 +190,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             else:
                 meta.name = _name_from_url(str(r0.url)) or "file"
 
-        # Prepare output file
+        # Prepare temp file
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
-        # If size unknown, single stream GET
+        # If size unknown, single stream
         if size is None:
             written = 0
             r = await client.get(url, headers=_headers_for(url))
@@ -117,37 +212,15 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 meta.size = written
             return path, meta
 
-        # Ranged download
-        parts = math.ceil(size / CHUNK)
-        written = 0
-        with open(path, "wb") as f:
-            for i in range(parts):
-                start = i * CHUNK
-                end = min(size - 1, start + CHUNK - 1)
-                attempts = 3
-                last_err = None
-                for _ in range(attempts):
-                    try:
-                        rr = await client.get(url, headers=_headers_for(url, f"bytes={start}-{end}"))
-                        if rr.status_code not in (200, 206):
-                            last_err = RuntimeError(f"Chunk {i+1}/{parts} HTTP {rr.status_code}")
-                            continue
-                        f.write(rr.content)
-                        written += len(rr.content)
-                        if on_progress:
-                            try:
-                                on_progress(written, size)
-                            except Exception:
-                                pass
-                        last_err = None
-                        break
-                    except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError) as e:
-                        last_err = e
-                        continue
-                if last_err is not None:
-                    raise RuntimeError(f"CDN refused chunk {i+1}/{parts}: {last_err}")
+        # Parallel segmented download
+        await download_parallel(client, url, size, path, _headers_for, on_progress, workers=DEFAULT_MAX_WORKERS)
 
-        if meta.size is None and written > 0:
-            meta.size = written
+        # Finalize
+        if meta.size is None:
+            try:
+                meta.size = os.path.getsize(path)
+            except Exception:
+                pass
 
         return path, meta
+    
