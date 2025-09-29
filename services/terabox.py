@@ -6,13 +6,13 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_fixed
 from services.downloader import FileMeta
 
-# Optional external lib hook (safe if absent)
+# Optional external lib (not required). If added to requirements later, it will be used.
 try:
-    from terabox_linker import get_direct_link  # not required
+    from terabox_linker import get_direct_link  # type: ignore
 except Exception:
     get_direct_link = None
 
-# Regexes to extract pageData JSON Terabox embeds
+# Regex to capture the big JSON Terabox embeds on share pages
 _PAGE_DATA_RE = re.compile(r"window\.pageData\s*=\s*(\{.*?\});", re.DOTALL)
 _DLINK_RE = re.compile(r'"dlink"\s*:\s*"([^"]+)"')
 _NAME_RE = re.compile(r'"server_filename"\s*:\s*"([^"]+)"')
@@ -21,10 +21,10 @@ _SIZE_RE = re.compile(r'"size"\s*:\s*(\d+)')
 class TeraboxResolver:
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     async def resolve(self, share_url: str) -> FileMeta:
-        # 1) Try optional library
+        # 1) Try optional third-party library if present
         url, name, size = await self._with_lib(share_url)
         if not url:
-            # 2) Parse page HTML for pageData JSON with dlink/name/size
+            # 2) Parse the share page for embedded JSON/regex fields
             url, name, size = await self._from_page(share_url)
         if not url:
             raise RuntimeError("Unable to resolve direct link")
@@ -52,14 +52,13 @@ class TeraboxResolver:
             r.raise_for_status()
             html = r.text
 
-            # Extract pageData JSON if present
+            # A) window.pageData JSON used on terabox.com
             m = _PAGE_DATA_RE.search(html)
             if m:
                 raw = m.group(1)
                 try:
                     data = json.loads(raw)
-                    # Common locations:
-                    # data["shareInfo"]["file_list"][0]["dlink"], ["server_filename"], ["size"]
+                    # Common locations for file list
                     file_list = (
                         data.get("shareInfo", {}).get("file_list")
                         or data.get("file_list")
@@ -72,12 +71,13 @@ class TeraboxResolver:
                         name = f0.get("server_filename") or f0.get("filename")
                         size = f0.get("size")
                         if dlink:
-                            return dlink.encode("utf-8").decode("unicode_escape"), name, size
+                            direct = dlink.encode("utf-8").decode("unicode_escape")
+                            return direct, name, size
                 except Exception:
-                    # Fallback to regex if JSON parse fails
+                    # If JSON parse fails, fall through to regex
                     pass
 
-            # Regex fallback on HTML
+            # B) Regex fallback on HTML when JSON extraction fails
             d = _DLINK_RE.search(html)
             if d:
                 dlink = d.group(1).encode("utf-8").decode("unicode_escape")
@@ -89,12 +89,27 @@ class TeraboxResolver:
                 size = int(s.group(1)) if s else None
                 return dlink, name, size
 
-            # As last resort, follow possible redirect and infer headers
+            # C) 1024terabox/1024tera variant: script defines `var list = [...]`
+            try:
+                jmatch = re.search(r"var\s+list\s*=\s*(\[\s*{.*?}\s*]);", html, re.DOTALL)
+                if jmatch:
+                    arr = json.loads(jmatch.group(1))
+                    if isinstance(arr, list) and arr:
+                        f0 = arr[0]
+                        dlink = f0.get("dlink") or f0.get("url")
+                        name = f0.get("server_filename") or f0.get("filename")
+                        size = f0.get("size")
+                        if dlink:
+                            return dlink, name, size
+            except Exception:
+                pass
+
+            # D) As last resort, follow redirect to CDN and infer headers
             try:
                 r2 = await client.get(url)
                 final_url = str(r2.url)
                 if final_url and "terabox" not in final_url:
-                    # Try to head the CDN URL
+                    # Try to head the CDN URL for size and filename
                     h = await client.head(final_url)
                     size = int(h.headers.get("content-length") or 0) or None
                     cd = h.headers.get("content-disposition", "")
@@ -106,4 +121,4 @@ class TeraboxResolver:
                 pass
 
         return None, None, None
-    
+            
