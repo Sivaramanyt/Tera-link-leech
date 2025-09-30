@@ -8,7 +8,7 @@ import subprocess
 from mimetypes import guess_type
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
-from services.terabox import TeraboxResolver
+from services.terabox import get_resolver, cleanup_resolver
 from services.downloader import fetch_to_temp
 
 # ---------- Formatting ----------
@@ -138,9 +138,7 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
         except Exception:
             pass
 
-# ---------- Handler ----------
-
-resolver_v2 = TeraboxResolver()
+# ---------- Enhanced Handler ----------
 
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -155,11 +153,18 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = await context.bot.send_message(chat_id, "🔎 Resolving Terabox link...")
     
     try:
-        meta = await resolver_v2.resolve(share_url)
+        # Get resolver instance with proper error handling
+        resolver = await get_resolver()
+        meta = await resolver.resolve(share_url)
+        
     except Exception as e:
         error_msg = str(e)
-        if "HTTP 400" in error_msg or "400" in error_msg:
-            await status.edit_text("❌ Download failed: Link expired or invalid. Please get a fresh link from Terabox.")
+        if "HTTP 400" in error_msg or "400" in error_msg or "expired" in error_msg.lower():
+            await status.edit_text("❌ Link resolution failed: Link expired or invalid. Please get a fresh link from Terabox.")
+        elif "RuntimeError" in error_msg or "Future" in error_msg:
+            await status.edit_text("❌ Resolver error: Service temporarily unavailable. Please try again in a moment.")
+        elif "timeout" in error_msg.lower():
+            await status.edit_text("❌ Request timeout: Terabox servers are slow. Please try again later.")
         else:
             await status.edit_text(f"❌ Failed to resolve link: {error_msg}")
         return
@@ -240,15 +245,25 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         running = False
         error_msg = str(e)
+        
         if "HTTP 400" in error_msg or "400" in error_msg or "expired" in error_msg.lower():
             await status.edit_text("❌ Download failed: Link expired or server rejected request. Please get a fresh link from Terabox.")
+        elif "timeout" in error_msg.lower():
+            await status.edit_text("❌ Download timeout: File too large or connection too slow. Please try again later.")
+        elif "space" in error_msg.lower() or "disk" in error_msg.lower():
+            await status.edit_text("❌ Download failed: Insufficient server storage. Please try again later.")
         else:
             await status.edit_text(f"❌ Download failed: {error_msg}")
     
     finally:
         running = False
         try:
-            updater_task.cancel()
+            if updater_task:
+                updater_task.cancel()
+                try:
+                    await updater_task
+                except asyncio.CancelledError:
+                    pass
         except Exception:
             pass
         
@@ -258,8 +273,22 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
+# ---------- Cleanup Handler ----------
+
+async def cleanup_handler():
+    """Cleanup resources on shutdown"""
+    try:
+        await cleanup_resolver()
+    except Exception:
+        pass
+
+# ---------- Export ----------
+
 leech_handler = leech_handler_v2
 
 def get_enhanced_handler():
     return CommandHandler("leech", leech_handler_v2)
+
+def get_cleanup_handler():
+    return cleanup_handler
     
