@@ -7,7 +7,7 @@ import httpx
 import random
 import time
 from urllib.parse import urlparse, parse_qs
-from tenacity import retry, stop_after_attempt, wait_fixed
+from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
 from services.downloader import FileMeta
 
 # Optional external helper (safe if absent)
@@ -54,109 +54,128 @@ API_HEADERS = {
 }
 
 class TeraboxResolver:
+    def __init__(self):
+        self._client = None
+        self._lock = asyncio.Lock()  # Prevent concurrent API calls
     
-    @retry(stop=stop_after_attempt(5), wait=wait_fixed(2))
-    async def resolve(self, share_url: str) -> FileMeta:
-        # Add random delay to avoid rate limiting
-        await asyncio.sleep(random.uniform(0.5, 2.0))
-        
-        # 0) Try the public API first
-        url, name, size = await self._via_public_api(share_url)
-        if not url:
-            # 1) Try optional library if present
-            url, name, size = await self._with_lib(share_url)
-        if not url:
-            # 2) Fallback to site flows (official + 1024tera API)
-            url, name, size = await self._site_flows(share_url)
-        
-        if not url:
-            raise RuntimeError("Unable to resolve direct link")
-        
-        return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
-    
-    async def _via_public_api(self, share_url: str):
-        try:
-            # Add timeout and better error handling
-            async with httpx.AsyncClient(
+    async def get_client(self):
+        """Get or create HTTP client"""
+        if self._client is None:
+            self._client = httpx.AsyncClient(
                 timeout=30,
                 follow_redirects=True,
                 headers=API_HEADERS,
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
-            ) as client:
-                # Add retries for API calls
-                for attempt in range(3):
-                    try:
-                        r = await client.get(API_ENDPOINT, params={"url": share_url})
-                        if r.status_code != 200:
-                            if attempt < 2:  # Retry on failure
-                                await asyncio.sleep(random.uniform(1, 3))
-                                continue
-                            return None, None, None
-                        
-                        js = r.json()
-                        
-                        # API returns an array under a fancy key, handle common shapes
-                        items = js.get("📜 Extracted Info") or js.get("data") or []
-                        if isinstance(items, list) and items:
-                            it = items[0]
-                            dlink = it.get("🔽 Direct Download Link") or it.get("url")
-                            name = it.get("📂 Title") or it.get("name")
-                            if dlink:
-                                return dlink, name, it.get("size")
-                        
-                        # Some deployments might return flat keys
-                        direct = js.get("direct") or js.get("download") or js.get("url")
-                        if direct:
-                            return direct, js.get("name") or js.get("filename"), js.get("size")
-                        
-                        break  # Success, exit retry loop
-                    except Exception as e:
-                        if attempt < 2:
-                            await asyncio.sleep(random.uniform(1, 3))
-                            continue
-                        break
-                        
-        except Exception:
-            pass
-        return None, None, None
+            )
+        return self._client
+    
+    async def close(self):
+        """Close HTTP client"""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+    
+    async def resolve(self, share_url: str) -> FileMeta:
+        """Main resolve method with proper error handling"""
+        async with self._lock:  # Prevent concurrent access
+            try:
+                # Add small delay to avoid overwhelming APIs
+                await asyncio.sleep(random.uniform(0.5, 1.0))
+                
+                # Try methods sequentially, not concurrently
+                url, name, size = await self._via_public_api(share_url)
+                if url:
+                    return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
+                
+                # Fallback to library method
+                if get_direct_link:
+                    url, name, size = await self._with_lib(share_url)
+                    if url:
+                        return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
+                
+                # Fallback to site flows
+                url, name, size = await self._site_flows(share_url)
+                if url:
+                    return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
+                
+                raise RuntimeError("Unable to resolve direct link from all methods")
+                
+            except Exception as e:
+                await self.close()  # Clean up on error
+                raise RuntimeError(f"Resolver error: {str(e)}")
+    
+    async def _via_public_api(self, share_url: str):
+        """Public API method with proper retry logic"""
+        try:
+            client = await self.get_client()
+            
+            # Single API call with proper timeout
+            response = await client.get(
+                API_ENDPOINT, 
+                params={"url": share_url},
+                timeout=15
+            )
+            
+            if response.status_code != 200:
+                return None, None, None
+            
+            js = response.json()
+            
+            # Handle different API response formats
+            items = js.get("📜 Extracted Info") or js.get("data") or []
+            if isinstance(items, list) and items:
+                item = items[0]
+                dlink = item.get("🔽 Direct Download Link") or item.get("url")
+                name = item.get("📂 Title") or item.get("name")
+                size = item.get("size")
+                if dlink:
+                    return dlink, name, size
+            
+            # Flat format fallback
+            direct = js.get("direct") or js.get("download") or js.get("url")
+            if direct:
+                return direct, js.get("name") or js.get("filename"), js.get("size")
+                
+            return None, None, None
+            
+        except Exception as e:
+            print(f"Public API error: {e}")
+            return None, None, None
     
     async def _with_lib(self, share_url: str):
+        """Library method wrapper"""
         if not get_direct_link:
             return None, None, None
         
-        loop = asyncio.get_event_loop()
         try:
-            data = await loop.run_in_executor(None, lambda: get_direct_link(share_url))
+            loop = asyncio.get_event_loop()
+            data = await loop.run_in_executor(None, get_direct_link, share_url)
             return data.get("url"), data.get("name"), data.get("size")
-        except Exception:
+        except Exception as e:
+            print(f"Library method error: {e}")
             return None, None, None
     
     async def _site_flows(self, share_url: str):
-        raw = share_url.strip().replace("\\", "/")
-        
-        async with httpx.AsyncClient(
-            follow_redirects=True,
-            timeout=30,
-            headers=HTML_HEADERS,
-            limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
-        ) as client:
+        """Site scraping method with proper error handling"""
+        try:
+            client = await self.get_client()
             
-            # Load first page to normalize domain and capture HTML
-            r0 = await client.get(raw, headers=HTML_HEADERS)
-            r0.raise_for_status()
+            # Load the page
+            response = await client.get(share_url, headers=HTML_HEADERS, timeout=15)
+            response.raise_for_status()
             
-            final = str(r0.url)
-            html = r0.text
-            host = urlparse(final).netloc.lower()
-            q = parse_qs(urlparse(final).query)
+            final_url = str(response.url)
+            html = response.text
+            host = urlparse(final_url).netloc.lower()
+            q = parse_qs(urlparse(final_url).query)
             surl = (q.get("surl") or q.get("shorturl") or [None])[0]
             pwd = (q.get("pwd") or q.get("password") or [None])[0]
             
-            # A) Official terabox embed: window.pageData JSON with dlink
-            m = _PAGE_DATA_RE.search(html)
-            if m:
+            # Try to extract from page data
+            match = _PAGE_DATA_RE.search(html)
+            if match:
                 try:
-                    data = json.loads(m.group(1))
+                    data = json.loads(match.group(1))
                     files = (
                         data.get("shareInfo", {}).get("file_list")
                         or data.get("file_list")
@@ -165,74 +184,94 @@ class TeraboxResolver:
                     )
                     
                     if isinstance(files, list) and files:
-                        f0 = files[0]
-                        dlink = f0.get("dlink")
-                        name = f0.get("server_filename") or f0.get("filename")
-                        size = f0.get("size")
+                        file_info = files[0]
+                        dlink = file_info.get("dlink")
+                        name = file_info.get("server_filename") or file_info.get("filename")
+                        size = file_info.get("size")
                         
                         if dlink:
                             return dlink.encode("utf-8").decode("unicode_escape"), name, size
                             
-                except Exception:
+                except json.JSONDecodeError as e:
+                    print(f"JSON parsing error: {e}")
                     pass
             
-            # B) 1024tera/1024terabox API: list -> transfer -> temp dlink
+            # Try 1024tera API if applicable
             if any(k in host for k in ["1024tera", "1024terabox"]) and surl:
-                list_ep = f"https://www.1024tera.com/share/list?surl={surl}&page=1&pageSize=50"
-                if pwd:
-                    list_ep += f"&pwd={pwd}"
+                return await self._try_1024tera_api(client, surl, pwd)
+            
+            return None, None, None
+            
+        except Exception as e:
+            print(f"Site flows error: {e}")
+            return None, None, None
+    
+    async def _try_1024tera_api(self, client, surl, pwd):
+        """1024tera API method"""
+        try:
+            list_url = f"https://www.1024tera.com/share/list?surl={surl}&page=1&pageSize=50"
+            if pwd:
+                list_url += f"&pwd={pwd}"
+            
+            response = await client.get(list_url, headers=API_HEADERS, timeout=15)
+            response.raise_for_status()
+            
+            payload = response.json()
+            items = payload.get("list") or payload.get("data") or payload.get("files") or []
+            
+            if isinstance(items, list) and items:
+                item = items[0]
+                name = item.get("server_filename") or item.get("filename")
+                size = item.get("size")
                 
-                try:
-                    # Add retries for 1024tera API
-                    for attempt in range(3):
-                        try:
-                            jl = await client.get(list_ep, headers=API_HEADERS)
-                            jl.raise_for_status()
-                            payload = jl.json()
-                            
-                            items = payload.get("list") or payload.get("data") or payload.get("files") or []
-                            if isinstance(items, list) and items:
-                                f0 = items[0]
-                                name = f0.get("server_filename") or f0.get("filename")
-                                size = f0.get("size")
-                                
-                                # Use dlink if already available
-                                dlink = f0.get("dlink") or f0.get("url")
-                                if dlink:
-                                    return dlink, name, size
-                                
-                                # Otherwise request transfer
-                                fs_id = f0.get("fs_id") or f0.get("fsid") or f0.get("id")
-                                body = {"surl": surl, "fs_id": fs_id}
-                                if pwd:
-                                    body["pwd"] = pwd
-                                
-                                for ep in [
-                                    "https://www.1024tera.com/share/transfer",
-                                    "https://www.1024tera.com/api/file/transfer",
-                                ]:
-                                    jt = await client.post(ep, headers=API_HEADERS, json=body)
-                                    if jt.status_code == 200:
-                                        jd = jt.json()
-                                        cand = (
-                                            jd.get("dlink")
-                                            or jd.get("url")
-                                            or jd.get("data", {}).get("dlink")
-                                            or jd.get("data", {}).get("url")
-                                        )
-                                        
-                                        if cand:
-                                            return cand, name, size
-                            break  # Success, exit retry loop
-                        except Exception as e:
-                            if attempt < 2:
-                                await asyncio.sleep(random.uniform(1, 3))
-                                continue
-                            break
-                            
-                except Exception:
-                    pass
-        
-        # No safe direct file link found
-        return None, None, None
-        
+                # Check for existing dlink
+                dlink = item.get("dlink") or item.get("url")
+                if dlink:
+                    return dlink, name, size
+                
+                # Request transfer
+                fs_id = item.get("fs_id") or item.get("fsid") or item.get("id")
+                if fs_id:
+                    body = {"surl": surl, "fs_id": fs_id}
+                    if pwd:
+                        body["pwd"] = pwd
+                    
+                    transfer_response = await client.post(
+                        "https://www.1024tera.com/share/transfer",
+                        headers=API_HEADERS,
+                        json=body,
+                        timeout=15
+                    )
+                    
+                    if transfer_response.status_code == 200:
+                        transfer_data = transfer_response.json()
+                        dlink = (
+                            transfer_data.get("dlink")
+                            or transfer_data.get("url")
+                            or transfer_data.get("data", {}).get("dlink")
+                        )
+                        if dlink:
+                            return dlink, name, size
+            
+            return None, None, None
+            
+        except Exception as e:
+            print(f"1024tera API error: {e}")
+            return None, None, None
+
+# Global resolver instance
+_resolver_instance = None
+
+async def get_resolver():
+    """Get global resolver instance"""
+    global _resolver_instance
+    if _resolver_instance is None:
+        _resolver_instance = TeraboxResolver()
+    return _resolver_instance
+
+async def cleanup_resolver():
+    """Cleanup global resolver"""
+    global _resolver_instance
+    if _resolver_instance:
+        await _resolver_instance.close()
+        _resolver_instance = None
