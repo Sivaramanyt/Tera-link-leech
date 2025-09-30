@@ -1,150 +1,291 @@
-import os
-import logging
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from handlers.leech import get_enhanced_handler
-import asyncio
-from threading import Thread
-import http.server
-import socketserver
+#!/usr/bin/env python3
+# bot.py
 
-# Configure detailed logging
+import asyncio
+import logging
+import os
+import sys
+import signal
+import tempfile
+import fcntl
+from pathlib import Path
+
+# Import bot components
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.error import TelegramError, NetworkError
+from handlers.leech import leech_handler_v2
+from handlers.start import start_handler
+from services.health import create_health_server
+
+# Configure comprehensive logging
 logging.basicConfig(
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# 🏥 NEW: Health check server for Koyeb
-def start_health_server():
-    """Start health check server so Koyeb knows bot is alive"""
-    PORT = int(os.environ.get('PORT', 8000))
+class SingleInstanceBot:
+    """Enhanced Telegram bot with single instance protection and health monitoring"""
     
-    class HealthHandler(http.server.SimpleHTTPRequestHandler):
-        def do_GET(self):
-            # Respond to GET health checks
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-            self.wfile.write(b'Terabox Bot: Healthy and Running!')
-                
-        def do_HEAD(self):
-            # Respond to HEAD health checks (this fixes the 501 errors)
-            self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
-            self.end_headers()
-                
-        def log_message(self, format, *args):
-            # Suppress HTTP server logs to avoid spam
-            pass
+    def __init__(self):
+        self.bot_token = os.getenv('BOT_TOKEN')
+        self.port = int(os.getenv('PORT', 8000))
+        self.application = None
+        self.health_server = None
+        self.lock_fd = None
+        
+        if not self.bot_token:
+            logger.error("❌ BOT_TOKEN environment variable not found!")
+            sys.exit(1)
+        
+        logger.info(f"🔑 Bot token found: {self.bot_token[:10]}...")
+        logger.info(f"🚀 Starting Terabox Leech Pro Bot with enhanced single instance protection...")
     
-    try:
-        with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
-            logger.info(f"🏥 Health check server started on port {PORT}")
-            httpd.serve_forever()
-    except Exception as e:
-        logger.error(f"❌ Health server error: {e}")
-
-# Your existing start handler (keeping all your current code)
-async def start_handler(update, context):
-    """Handle /start command with detailed logging"""
-    logger.info(f"📨 START command received from user {update.effective_user.id}")
-    
-    welcome_msg = (
-        "🚀 <b>Terabox Leech Pro Bot</b>\n\n"
-        "📋 <b>Commands:</b>\n"
-        "• /start - Show this help\n"
-        "• /leech &lt;terabox_link&gt; - Download and send file\n\n"
-        "📝 <b>Usage:</b>\n"
-        "Send me a Terabox share link and I'll download it for you!\n\n"
-        "⚡ <b>Example:</b>\n"
-        "<code>/leech https://teraboxurl.com/s/1abc...</code>\n\n"
-        "via @Terabox_leech_Pro_bot"
-    )
-    
-    try:
-        await update.message.reply_text(
-            welcome_msg,
-            parse_mode='HTML',
-            disable_web_page_preview=True
-        )
-        logger.info(f"✅ START response sent successfully")
-    except Exception as e:
-        logger.error(f"❌ START response failed: {e}")
-
-# Your existing debug handler (keeping all your current code)
-async def debug_message_handler(update, context):
-    """Debug handler to catch all messages"""
-    user_id = update.effective_user.id
-    message_text = update.message.text if update.message.text else "No text"
-    
-    logger.info(f"🔍 DEBUG: Message from user {user_id}: '{message_text}'")
-    
-    if message_text.startswith('/leech'):
-        logger.info(f"🎯 LEECH command detected: '{message_text}'")
-    else:
-        logger.info(f"📝 Non-leech message: '{message_text}'")
-
-# Your existing error handler (keeping all your current code)
-async def error_handler(update, context):
-    """Handle all errors with detailed logging"""
-    logger.error(f"❌ ERROR occurred: {context.error}")
-    logger.error(f"❌ Update that caused error: {update}")
-    
-    if update and update.effective_message:
+    def ensure_single_instance(self):
+        """Ensure only one bot instance runs at a time"""
         try:
-            await update.effective_message.reply_text(
-                f"❌ An error occurred: {str(context.error)}"
-            )
+            # Create a lock file in temp directory
+            lock_file = os.path.join(tempfile.gettempdir(), 'terabox_leech_bot.lock')
+            self.lock_fd = open(lock_file, 'w')
+            
+            # Try to acquire exclusive lock (non-blocking)
+            fcntl.flock(self.lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            
+            # Write current process ID
+            self.lock_fd.write(str(os.getpid()))
+            self.lock_fd.flush()
+            
+            logger.info(f"🔒 Single instance lock acquired: PID {os.getpid()}")
+            return True
+            
+        except (IOError, OSError) as e:
+            logger.error(f"❌ Another bot instance is already running!")
+            logger.error(f"❌ Lock error: {e}")
+            return False
+    
+    def release_lock(self):
+        """Release the instance lock"""
+        if self.lock_fd:
+            try:
+                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
+                self.lock_fd.close()
+                logger.info("🔓 Instance lock released")
+            except Exception as e:
+                logger.warning(f"⚠️ Lock release error: {e}")
+    
+    def setup_signal_handlers(self):
+        """Setup graceful shutdown signal handlers"""
+        def signal_handler(sig, frame):
+            logger.info(f"🛑 Received signal {sig}, initiating graceful shutdown...")
+            asyncio.create_task(self.shutdown())
+        
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+    
+    def setup_handlers(self):
+        """Setup bot command and message handlers"""
+        logger.info("📝 Adding handlers...")
+        
+        # Add command handlers
+        self.application.add_handler(CommandHandler("start", start_handler))
+        logger.info("✅ START handler added")
+        
+        self.application.add_handler(CommandHandler("leech", leech_handler_v2))
+        logger.info("✅ LEECH handler added")
+        
+        # Add debug message handler for testing
+        async def debug_handler(update, context):
+            logger.info(f"🐛 Debug message from {update.effective_user.id}: {update.message.text}")
+            await update.message.reply_text("🤖 Bot is alive and responding!")
+        
+        self.application.add_handler(CommandHandler("debug", debug_handler))
+        logger.info("✅ DEBUG handler added")
+        
+        # Global error handler
+        async def error_handler(update, context):
+            logger.error(f"❌ ERROR occurred: {context.error}")
+            logger.error(f"❌ Update that caused error: {update}")
+            
+            if update and update.effective_message:
+                try:
+                    await update.effective_message.reply_text(
+                        "❌ An error occurred while processing your request. Please try again."
+                    )
+                except Exception as e:
+                    logger.error(f"❌ Failed to send error message: {e}")
+        
+        self.application.add_error_handler(error_handler)
+        logger.info("✅ ERROR handler added")
+    
+    async def start_health_server(self):
+        """Start the health check server"""
+        try:
+            logger.info("🏥 Starting health check server...")
+            self.health_server = await create_health_server(self.port)
+            logger.info(f"🏥 Health check server started on port {self.port}")
         except Exception as e:
-            logger.error(f"❌ Could not send error message: {e}")
+            logger.error(f"❌ Failed to start health server: {e}")
+            raise
+    
+    async def initialize_bot(self):
+        """Initialize the Telegram bot application"""
+        try:
+            # Create application with enhanced settings
+            self.application = (
+                Application.builder()
+                .token(self.bot_token)
+                .concurrent_updates(1)  # Process updates one at a time
+                .build()
+            )
+            
+            # Setup handlers
+            self.setup_handlers()
+            
+            # Initialize application
+            await self.application.initialize()
+            logger.info("✅ Bot application initialized")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Bot initialization failed: {e}")
+            return False
+    
+    async def start_polling(self):
+        """Start bot polling with enhanced error handling"""
+        try:
+            # Clear any pending updates and start polling
+            await self.application.start()
+            logger.info("📡 Starting bot polling...")
+            
+            # Start polling with drop_pending_updates to avoid conflicts
+            await self.application.updater.start_polling(
+                drop_pending_updates=True,  # Important: Drop old updates
+                allowed_updates=None
+            )
+            
+            logger.info("✅ Bot polling started successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to start polling: {e}")
+            return False
+    
+    async def shutdown(self):
+        """Graceful shutdown of all services"""
+        logger.info("🛑 Starting graceful shutdown...")
+        
+        try:
+            # Stop bot polling
+            if self.application and self.application.updater:
+                logger.info("📡 Stopping bot polling...")
+                await self.application.updater.stop()
+                await self.application.stop()
+                await self.application.shutdown()
+                logger.info("✅ Bot stopped successfully")
+            
+            # Stop health server
+            if self.health_server:
+                logger.info("🏥 Stopping health server...")
+                self.health_server.should_exit = True
+                logger.info("✅ Health server stopped")
+            
+            # Release instance lock
+            self.release_lock()
+            
+            logger.info("✅ Graceful shutdown completed")
+            
+        except Exception as e:
+            logger.error(f"❌ Error during shutdown: {e}")
+        
+        finally:
+            # Force exit if needed
+            sys.exit(0)
+    
+    async def run(self):
+        """Main run method"""
+        try:
+            # Check single instance
+            if not self.ensure_single_instance():
+                logger.error("❌ Exiting due to multiple instance conflict")
+                sys.exit(1)
+            
+            # Setup signal handlers
+            self.setup_signal_handlers()
+            
+            # Start health server
+            await self.start_health_server()
+            
+            # Initialize and start bot
+            if not await self.initialize_bot():
+                logger.error("❌ Bot initialization failed")
+                sys.exit(1)
+            
+            if not await self.start_polling():
+                logger.error("❌ Bot polling failed to start")
+                sys.exit(1)
+            
+            # Keep running
+            logger.info("🎯 Bot is fully operational and ready!")
+            
+            # Run indefinitely
+            while True:
+                await asyncio.sleep(1)
+                
+        except KeyboardInterrupt:
+            logger.info("🛑 Keyboard interrupt received")
+        except Exception as e:
+            logger.error(f"❌ Fatal error: {e}")
+        finally:
+            await self.shutdown()
 
-def main():
-    """Main function with comprehensive logging and health check server"""
-    
-    # 🏥 NEW: Start health check server in background thread
-    logger.info("🏥 Starting health check server...")
-    health_thread = Thread(target=start_health_server, daemon=True)
-    health_thread.start()
-    
-    # Get bot token (your existing code)
-    token = os.getenv("BOT_TOKEN")
-    if not token:
-        logger.error("❌ BOT_TOKEN not found in environment variables")
-        return
-    
-    logger.info(f"🔑 Bot token found: {token[:10]}...")
-    
-    # Create application (your existing code)
-    application = Application.builder().token(token).build()
-    
-    # Add handlers with logging (your existing code)
-    logger.info("📝 Adding handlers...")
-    
-    # Start handler
-    application.add_handler(CommandHandler("start", start_handler))
-    logger.info("✅ START handler added")
-    
-    # Leech handler  
-    leech_handler = get_enhanced_handler()
-    application.add_handler(leech_handler)
-    logger.info("✅ LEECH handler added")
-    
-    # Debug message handler (catches all messages)
-    application.add_handler(MessageHandler(filters.TEXT, debug_message_handler))
-    logger.info("✅ DEBUG message handler added")
-    
-    # Error handler
-    application.add_error_handler(error_handler)
-    logger.info("✅ ERROR handler added")
-    
-    # Start the bot (your existing code)
-    logger.info("🚀 Starting Terabox Leech Pro Bot with debug logging and health checks...")
+# Enhanced start handler
+async def start_handler(update, context):
+    """Enhanced start handler with bot status"""
+    welcome_message = f"""
+🔥 **Terabox Leech Pro Bot** 🔥
+
+Welcome! I can download files from Terabox and upload them to Telegram.
+
+**Commands:**
+• `/start` - Show this help message
+• `/leech <terabox_link>` - Download and upload file
+• `/debug` - Test bot responsiveness
+
+**Features:**
+✅ Memory-optimized for free tier hosting
+✅ Enhanced retry logic for unstable servers  
+✅ Progress tracking with speed indicators
+✅ Support for files up to 80MB
+✅ Automatic error recovery
+✅ Single instance protection
+
+**Example:**
+`/leech https://terabox.com/s/1abc...`
+
+**Bot Status:** 🟢 Online and Ready
+**Instance ID:** `{os.getpid()}`
+"""
     
     try:
-        application.run_polling(drop_pending_updates=True)
+        await update.message.reply_text(welcome_message, parse_mode='Markdown')
+        logger.info(f"✅ Start message sent to user {update.effective_user.id}")
     except Exception as e:
-        logger.error(f"💥 Bot startup failed: {e}")
+        logger.error(f"❌ Failed to send start message: {e}")
+
+async def main():
+    """Main entry point"""
+    bot = SingleInstanceBot()
+    await bot.run()
 
 if __name__ == "__main__":
-    main()
-        
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Bot stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Fatal startup error: {e}")
+        sys.exit(1)
