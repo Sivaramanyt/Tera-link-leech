@@ -9,30 +9,39 @@ import time
 from urllib.parse import urlparse, parse_qs, unquote
 from services.downloader import FileMeta
 
-# Working APIs found in successful implementations
-WORKING_APIs = [
+# Updated working APIs (as of September 2025)
+RELIABLE_APIs = [
     {
-        "url": "https://terabox-dl.qtcloud.workers.dev/api/get-info", 
-        "format": "qtcloud"
+        "url": "https://teradownloader.com/api/download",
+        "method": "POST",
+        "format": "teradownloader"
     },
     {
-        "url": "https://terabox-downloader.vercel.app/api/download",
-        "format": "vercel_new"  
+        "url": "https://api.terabox-dl.workers.dev/download", 
+        "method": "POST",
+        "format": "workers"
     },
     {
-        "url": "https://terabox-api-theta.vercel.app/api",
-        "format": "theta"
-    },
-    {
-        "url": "https://terabox-dl.onrender.com/download",
-        "format": "render"
+        "url": "https://terabox-api.onrender.com/api/v1/download",
+        "method": "POST", 
+        "format": "render_v1"
     }
 ]
 
-# Enhanced headers based on successful implementations
-BROWSER_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+# Fallback direct extraction patterns
+EXTRACTION_PATTERNS = [
+    r'"dlink":"([^"]+)"',
+    r'"downloadUrl":"([^"]+)"',
+    r'"direct_link":"([^"]+)"',
+    r'window\.pageData\s*=\s*({.*?});',
+    r'locals\.mset\(({.*?})\)',
+    r'"url":"(https://[^"]*teracdn[^"]*)"'
+]
+
+# Enhanced browser headers
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
     "Accept-Language": "en-US,en;q=0.9",
     "Accept-Encoding": "gzip, deflate, br",
     "DNT": "1",
@@ -41,18 +50,7 @@ BROWSER_HEADERS = {
     "Sec-Fetch-Dest": "document",
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-}
-
-API_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Content-Type": "application/json;charset=UTF-8",
-    "Origin": "https://www.terabox.com",
-    "Referer": "https://www.terabox.com/",
-    "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
+    "sec-ch-ua": '"Not A(Brand";v="99", "Microsoft Edge";v="121", "Chromium";v="121"',
     "sec-ch-ua-mobile": "?0",
     "sec-ch-ua-platform": '"Windows"',
 }
@@ -65,10 +63,10 @@ class TeraboxResolver:
     async def get_client(self):
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, read=60.0),
+                timeout=httpx.Timeout(45.0, read=90.0),
                 follow_redirects=True,
-                headers=BROWSER_HEADERS,
-                limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
+                headers=HEADERS,
+                limits=httpx.Limits(max_keepalive_connections=3, max_connections=6)
             )
         return self._client
     
@@ -80,232 +78,292 @@ class TeraboxResolver:
     async def resolve(self, share_url: str) -> FileMeta:
         async with self._lock:
             try:
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+                # Rate limiting
+                await asyncio.sleep(random.uniform(2.0, 4.0))
                 
-                print(f"[TeraboxResolver] Starting resolution for: {share_url}")
+                print(f"[TeraboxResolver] 🔍 Resolving: {share_url}")
                 
-                # Method 1: Try working APIs sequentially
-                for api_config in WORKING_APIs:
+                # Clean and normalize the URL
+                clean_url = self._normalize_url(share_url)
+                print(f"[TeraboxResolver] 🔗 Normalized URL: {clean_url}")
+                
+                # Method 1: Try working APIs with proper error handling
+                for api_config in RELIABLE_APIs:
                     try:
-                        result = await self._try_working_api(api_config, share_url)
-                        if result[0]:  # If URL found
-                            print(f"[TeraboxResolver] ✅ Success via {api_config['format']}")
+                        print(f"[TeraboxResolver] 🧪 Trying API: {api_config['format']}")
+                        result = await self._try_reliable_api(api_config, clean_url)
+                        if result and result[0]:
+                            print(f"[TeraboxResolver] ✅ SUCCESS via {api_config['format']}")
                             return FileMeta(
-                                name=result[1] or "terabox_file",
+                                name=result[1] or "terabox_file.mp4",
                                 size=int(result[2]) if result[2] else None,
                                 url=result[0]
                             )
+                        else:
+                            print(f"[TeraboxResolver] ❌ {api_config['format']} returned empty")
                     except Exception as e:
                         print(f"[TeraboxResolver] ❌ {api_config['format']} failed: {e}")
                         continue
                 
-                # Method 2: Enhanced direct extraction
-                result = await self._direct_extraction(share_url)
-                if result[0]:
-                    print(f"[TeraboxResolver] ✅ Success via direct extraction")
+                # Method 2: Direct page scraping with multiple attempts
+                print(f"[TeraboxResolver] 🕷️ Attempting direct scraping...")
+                result = await self._scrape_terabox_page(clean_url)
+                if result and result[0]:
+                    print(f"[TeraboxResolver] ✅ SUCCESS via direct scraping")
                     return FileMeta(
-                        name=result[1] or "terabox_file",
+                        name=result[1] or "terabox_file.mp4",
                         size=int(result[2]) if result[2] else None,
                         url=result[0]
                     )
                 
+                # Method 3: Try alternative URL formats
+                print(f"[TeraboxResolver] 🔄 Trying alternative URL formats...")
+                for alt_url in self._generate_alternative_urls(clean_url):
+                    try:
+                        result = await self._scrape_terabox_page(alt_url)
+                        if result and result[0]:
+                            print(f"[TeraboxResolver] ✅ SUCCESS via alternative URL: {alt_url}")
+                            return FileMeta(
+                                name=result[1] or "terabox_file.mp4",
+                                size=int(result[2]) if result[2] else None,
+                                url=result[0]
+                            )
+                    except Exception as e:
+                        print(f"[TeraboxResolver] ❌ Alternative URL failed: {e}")
+                        continue
+                
+                print(f"[TeraboxResolver] ❌ All methods failed")
                 raise RuntimeError("Link expired or invalid. Please get a fresh link from Terabox.")
                 
             except Exception as e:
                 await self.close()
-                error_msg = str(e)
-                if "expired" in error_msg.lower() or "invalid" in error_msg.lower():
+                error_msg = str(e).lower()
+                if any(x in error_msg for x in ["expired", "invalid", "private", "not found"]):
                     raise RuntimeError("Link expired or invalid. Please get a fresh link from Terabox.")
                 else:
-                    raise RuntimeError(f"Resolver error: {error_msg}")
+                    raise RuntimeError(f"Resolver error: {str(e)}")
     
-    async def _try_working_api(self, api_config, share_url):
-        """Try working API endpoints with proper format handling"""
+    def _normalize_url(self, url: str) -> str:
+        """Normalize Terabox URLs to standard format"""
+        # Handle different domain variations
+        replacements = [
+            ("teraboxurl.com", "www.terabox.com"),
+            ("1024tera.com", "www.terabox.com"),
+            ("4funbox.com", "www.terabox.com"),
+            ("mirrobox.com", "www.terabox.com"),
+            ("nephobox.com", "www.terabox.com"),
+            ("terabox.app", "www.terabox.com"),
+        ]
+        
+        clean_url = url.strip()
+        for old, new in replacements:
+            if old in clean_url:
+                clean_url = clean_url.replace(old, new)
+        
+        # Ensure https
+        if not clean_url.startswith(('http://', 'https://')):
+            clean_url = 'https://' + clean_url
+        
+        return clean_url
+    
+    def _generate_alternative_urls(self, base_url: str) -> list:
+        """Generate alternative URL formats"""
+        alternatives = []
+        
+        try:
+            parsed = urlparse(base_url)
+            
+            # Extract surl parameter if present
+            if "surl=" in parsed.query:
+                surl = parse_qs(parsed.query).get("surl", [None])[0]
+                if surl:
+                    alternatives.extend([
+                        f"https://www.terabox.com/s/{surl}",
+                        f"https://www.terabox.com/sharing/link?surl={surl}",
+                    ])
+            
+            # Extract from path
+            if "/s/" in parsed.path:
+                path_part = parsed.path.split("/s/")[-1]
+                alternatives.extend([
+                    f"https://www.terabox.com/s/{path_part}",
+                    f"https://www.terabox.com/sharing/link?surl={path_part}",
+                ])
+        except:
+            pass
+        
+        return list(set(alternatives))  # Remove duplicates
+    
+    async def _try_reliable_api(self, api_config: dict, url: str):
+        """Try reliable API endpoints"""
         try:
             client = await self.get_client()
             
-            # Prepare request based on API format
-            if api_config["format"] == "qtcloud":
-                params = {"url": share_url}
-                response = await client.get(api_config["url"], params=params, headers=API_HEADERS, timeout=20)
+            # Prepare request payload
+            if api_config["format"] == "teradownloader":
+                payload = {"url": url, "format": "json"}
+                headers = {**HEADERS, "Content-Type": "application/json"}
                 
-            elif api_config["format"] == "vercel_new":
-                data = {"url": share_url}
-                response = await client.post(api_config["url"], json=data, headers=API_HEADERS, timeout=20)
+            elif api_config["format"] == "workers":
+                payload = {"link": url}
+                headers = {**HEADERS, "Content-Type": "application/json"}
                 
-            elif api_config["format"] == "theta":
-                params = {"url": share_url}
-                response = await client.get(api_config["url"], params=params, headers=API_HEADERS, timeout=20)
-                
-            elif api_config["format"] == "render":
-                data = {"link": share_url}
-                response = await client.post(api_config["url"], json=data, headers=API_HEADERS, timeout=20)
+            elif api_config["format"] == "render_v1":
+                payload = {"terabox_url": url}
+                headers = {**HEADERS, "Content-Type": "application/json"}
                 
             else:
                 return None, None, None
             
+            # Make request
+            if api_config["method"] == "POST":
+                response = await client.post(
+                    api_config["url"],
+                    json=payload,
+                    headers=headers,
+                    timeout=30
+                )
+            else:
+                response = await client.get(
+                    api_config["url"],
+                    params=payload,
+                    headers=headers,
+                    timeout=30
+                )
+            
             if response.status_code != 200:
+                print(f"[TeraboxResolver] API {api_config['format']} returned {response.status_code}")
                 return None, None, None
             
             # Parse response
             try:
-                js_data = response.json()
-            except json.JSONDecodeError:
+                data = response.json()
+            except:
+                print(f"[TeraboxResolver] API {api_config['format']} returned non-JSON")
                 return None, None, None
             
-            # Extract data based on different response formats
-            return self._extract_from_api_response(js_data, api_config["format"])
+            # Extract download info based on API format
+            return self._extract_api_data(data, api_config["format"])
             
         except Exception as e:
-            print(f"[TeraboxResolver] API {api_config['format']} error: {e}")
+            print(f"[TeraboxResolver] API {api_config['format']} exception: {e}")
             return None, None, None
     
-    def _extract_from_api_response(self, data, api_format):
-        """Extract download info from different API response formats"""
+    def _extract_api_data(self, data: dict, api_format: str):
+        """Extract download information from API responses"""
         try:
-            # Format 1: qtcloud workers
-            if api_format == "qtcloud":
+            if api_format == "teradownloader":
                 if data.get("success") and data.get("data"):
-                    file_info = data["data"]
+                    file_data = data["data"]
                     return (
-                        file_info.get("downloadUrl") or file_info.get("url"),
-                        file_info.get("fileName") or file_info.get("name"),
-                        file_info.get("fileSize") or file_info.get("size")
+                        file_data.get("download_url"),
+                        file_data.get("filename"),
+                        file_data.get("filesize")
                     )
             
-            # Format 2: vercel new format
-            elif api_format == "vercel_new":
-                if data.get("success") or data.get("status") == "success":
-                    file_data = data.get("data") or data.get("result")
-                    if isinstance(file_data, list) and file_data:
-                        file_info = file_data[0]
-                    else:
-                        file_info = file_data or {}
-                    
+            elif api_format == "workers":
+                if data.get("status") == "success" and data.get("result"):
+                    file_data = data["result"]
                     return (
-                        file_info.get("direct_link") or file_info.get("downloadUrl"),
-                        file_info.get("filename") or file_info.get("name"),
-                        file_info.get("size") or file_info.get("fileSize")
+                        file_data.get("direct_link"),
+                        file_data.get("name"),
+                        file_data.get("size")
                     )
             
-            # Format 3: theta format
-            elif api_format == "theta":
-                if data.get("files") and isinstance(data["files"], list):
-                    file_info = data["files"][0]
+            elif api_format == "render_v1":
+                if data.get("success") and data.get("download_link"):
                     return (
-                        file_info.get("link") or file_info.get("url"),
-                        file_info.get("name") or file_info.get("filename"),
-                        file_info.get("size")
-                    )
-            
-            # Format 4: render format
-            elif api_format == "render":
-                if data.get("download_url"):
-                    return (
-                        data.get("download_url"),
-                        data.get("file_name") or data.get("filename"),
-                        data.get("file_size") or data.get("size")
+                        data.get("download_link"),
+                        data.get("file_name"),
+                        data.get("file_size")
                     )
             
             # Generic extraction
-            direct_url = (
-                data.get("direct_link") or data.get("downloadUrl") or 
-                data.get("download_url") or data.get("url") or 
-                data.get("dlink")
+            download_url = (
+                data.get("download_url") or data.get("direct_link") or
+                data.get("downloadUrl") or data.get("url") or data.get("link")
             )
             
-            if direct_url:
+            if download_url:
                 filename = (
-                    data.get("filename") or data.get("fileName") or 
-                    data.get("file_name") or data.get("name") or
-                    data.get("title")
+                    data.get("filename") or data.get("file_name") or
+                    data.get("name") or data.get("title")
                 )
                 filesize = (
-                    data.get("size") or data.get("fileSize") or 
-                    data.get("file_size")
+                    data.get("filesize") or data.get("file_size") or
+                    data.get("size")
                 )
-                return direct_url, filename, filesize
+                return download_url, filename, filesize
             
             return None, None, None
             
         except Exception as e:
-            print(f"[TeraboxResolver] Extraction error for {api_format}: {e}")
+            print(f"[TeraboxResolver] Data extraction error for {api_format}: {e}")
             return None, None, None
     
-    async def _direct_extraction(self, share_url):
-        """Direct extraction from Terabox page"""
+    async def _scrape_terabox_page(self, url: str):
+        """Scrape Terabox page directly"""
         try:
             client = await self.get_client()
             
-            # Normalize URL
-            if "teraboxurl.com" in share_url:
-                share_url = share_url.replace("teraboxurl.com", "www.terabox.com")
-            
-            # Get the page
-            response = await client.get(share_url, headers=BROWSER_HEADERS, timeout=20)
+            # Get page with proper headers
+            response = await client.get(url, headers=HEADERS, timeout=30)
             response.raise_for_status()
             
             html = response.text
-            final_url = str(response.url)
+            print(f"[TeraboxResolver] 📄 Page loaded, size: {len(html)} chars")
             
-            # Try multiple extraction patterns
-            patterns = [
-                r'"dlink":"([^"]+)"',
-                r'"downloadUrl":"([^"]+)"', 
-                r'"direct_link":"([^"]+)"',
-                r'window\.pageData\s*=\s*({[^}]+})',
-                r'locals\.mset\(({[^}]+})\)',
-            ]
-            
-            for pattern in patterns:
-                matches = re.findall(pattern, html)
+            # Try extraction patterns
+            for pattern in EXTRACTION_PATTERNS:
+                matches = re.findall(pattern, html, re.DOTALL)
                 for match in matches:
-                    if match.startswith('http') and ('terabox' in match or 'teracdn' in match):
+                    if match.startswith('http') and any(domain in match for domain in ['teracdn', 'terabox']):
                         # Found direct URL
                         try:
-                            # Try to decode if it's escaped
-                            url = match.encode().decode('unicode_escape')
+                            clean_url = match.encode().decode('unicode_escape')
+                            print(f"[TeraboxResolver] 🎯 Found direct URL via pattern: {pattern[:20]}...")
+                            return clean_url, "terabox_file", None
                         except:
-                            url = match
-                        
-                        return url, "terabox_file", None
+                            return match, "terabox_file", None
                     
                     elif match.startswith('{'):
                         # Found JSON data
                         try:
                             json_data = json.loads(match)
-                            url = self._extract_from_json(json_data)
-                            if url:
-                                return url, "terabox_file", None
+                            direct_url = self._extract_from_json_data(json_data)
+                            if direct_url:
+                                print(f"[TeraboxResolver] 🎯 Found URL in JSON data")
+                                return direct_url, "terabox_file", None
                         except:
                             continue
             
             return None, None, None
             
         except Exception as e:
-            print(f"[TeraboxResolver] Direct extraction error: {e}")
+            print(f"[TeraboxResolver] Scraping error: {e}")
             return None, None, None
     
-    def _extract_from_json(self, data):
-        """Extract URL from JSON data"""
+    def _extract_from_json_data(self, data):
+        """Extract download URL from JSON data"""
         if isinstance(data, dict):
             # Look for download URLs
-            for key in ['dlink', 'downloadUrl', 'direct_link', 'url']:
+            url_keys = ['dlink', 'downloadUrl', 'direct_link', 'url', 'download_url']
+            for key in url_keys:
                 if key in data and data[key]:
                     url = data[key]
-                    if isinstance(url, str) and ('terabox' in url or 'teracdn' in url):
+                    if isinstance(url, str) and ('teracdn' in url or 'terabox' in url):
                         return url
             
-            # Look nested
+            # Recursive search
             for value in data.values():
                 if isinstance(value, (dict, list)):
-                    result = self._extract_from_json(value)
+                    result = self._extract_from_json_data(value)
                     if result:
                         return result
         
         elif isinstance(data, list):
             for item in data:
-                result = self._extract_from_json(item)
+                result = self._extract_from_json_data(item)
                 if result:
                     return result
         
@@ -325,4 +383,3 @@ async def cleanup_resolver():
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
-                
