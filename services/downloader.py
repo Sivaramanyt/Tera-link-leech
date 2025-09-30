@@ -52,31 +52,51 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
         h["Range"] = range_hdr
     return h
 
-# Parallel segmented downloader config
-DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "4"))
+# ---------------- Parallel segmented downloader ----------------
+DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "4"))  # tune 3–6 as bandwidth allows
 MIN_CHUNK = 256 * 1024
-START_CHUNK = 512 * 1024  # initial subrequest size; adapts down on errors
+START_CHUNK = 256 * 1024     # smaller start to avoid hot throttling; adapts
+MAX_BACKOFF = 2.0            # seconds
+BASE_BACKOFF = 0.25          # seconds
 
 async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int,
                        headers_fn, attempt_chunk: int, on_progress, total_size: int,
                        fhandle, write_offset: int):
     """
     Fetch a byte range [start, end] with retries; write directly at correct offset.
-    Resumes inside the range on partial responses and halves chunk size on errors.
+    Handles 5xx with backoff, resumes within the slice, and halves subrequest size on errors.
     """
     cur_start = start
     cur_chunk = attempt_chunk
+    backoff = BASE_BACKOFF
+
     while cur_start <= end:
         cur_end = min(end, cur_start + cur_chunk - 1)
         try:
             rr = await client.get(url, headers=headers_fn(f"bytes={cur_start}-{cur_end}"))
+
+            # Transient server errors: retry with smaller subrequest and backoff
+            if 500 <= rr.status_code < 600:
+                await asyncio.sleep(backoff)
+                backoff = min(MAX_BACKOFF, backoff * 2)
+                cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
+                continue
+
             if rr.status_code not in (200, 206):
                 raise RuntimeError(f"HTTP {rr.status_code}")
+
             data = rr.content
             if not data:
-                raise httpx.ReadError("empty body")
+                # Empty body, treat as transient read issue
+                await asyncio.sleep(backoff)
+                backoff = min(MAX_BACKOFF, backoff * 2)
+                cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
+                continue
 
-            # Write exactly at desired position (no truncation)
+            # Success: reset backoff
+            backoff = BASE_BACKOFF
+
+            # Write at the correct position
             fhandle.seek(write_offset + (cur_start - start))
             fhandle.write(data)
 
@@ -87,30 +107,15 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
                 except Exception:
                     pass
 
-            got = len(data)
-            cur_start += got
+            cur_start += len(data)
             continue
 
         except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError):
-            # Adaptive: reduce subrequest size and retry
+            # Connection-level issue: back off and shrink subrequest
+            await asyncio.sleep(backoff)
+            backoff = min(MAX_BACKOFF, backoff * 2)
             cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
-            await asyncio.sleep(0.5)
-            if cur_chunk <= MIN_CHUNK:
-                # Final attempt for this slice
-                rr = await client.get(url, headers=headers_fn(f"bytes={cur_start}-{cur_end}"))
-                if rr.status_code in (200, 206) and rr.content:
-                    data = rr.content
-                    fhandle.seek(write_offset + (cur_start - start))
-                    fhandle.write(data)
-                    if on_progress:
-                        try:
-                            done_bytes = min(total_size, write_offset + (cur_start - start) + len(data))
-                            on_progress(done_bytes, total_size)
-                        except Exception:
-                            pass
-                    cur_start += len(data)
-                    continue
-                raise
+            continue
 
 async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path: str,
                             headers_fn, on_progress=None, workers: Optional[int] = None):
@@ -119,11 +124,11 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
     """
     workers = workers or DEFAULT_MAX_WORKERS
 
-    # Pre-allocate the file to full size (sparse)
+    # Pre-allocate file
     with open(path, "wb") as f:
         f.truncate(size)
 
-    # Create balanced segments for workers
+    # Build balanced segments across the file
     base_seg = max(START_CHUNK * 8, size // max(1, workers * 16))
     segments = []
     s = 0
@@ -144,6 +149,7 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
 
     await asyncio.gather(*(run_seg(i, rng) for i, rng in enumerate(segments)))
 
+# ---------------- Entry point ----------------
 async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) -> tuple[str, FileMeta]:
     """
     Download to a temp file with CDN-friendly headers and parallel ranged GET.
@@ -152,7 +158,7 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
     url = meta.url
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Probe with tiny range GET to learn size/name; avoids HEAD 403 path
+        # Probe with a tiny range GET to learn size/name; avoids HEAD 403 on this CDN
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -187,7 +193,7 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             else:
                 meta.name = _name_from_url(str(r0.url)) or "file"
 
-        # Prepare output
+        # Prepare output file
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
@@ -220,3 +226,4 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 pass
 
         return path, meta
+                
