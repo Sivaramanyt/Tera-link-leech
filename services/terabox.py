@@ -6,10 +6,12 @@ import re
 import httpx
 import random
 import time
-from urllib.parse import urlparse, parse_qs, unquote
+from urllib.parse import urlparse, parse_qs
 from services.downloader import FileMeta
 
-# Based on anasty17's working implementation
+# The API that anasty17's bot actually uses
+WDZONE_API = "https://wdzone-terabox-api.vercel.app/api"
+
 class TeraboxResolver:
     def __init__(self):
         self._client = None
@@ -18,19 +20,15 @@ class TeraboxResolver:
     async def get_client(self):
         if self._client is None:
             self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0, read=60.0),
+                timeout=60.0,
                 follow_redirects=True,
                 headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                    "Accept": "application/json, text/plain, */*",
                     "Accept-Language": "en-US,en;q=0.9",
                     "Accept-Encoding": "gzip, deflate, br",
                     "DNT": "1",
                     "Connection": "keep-alive",
-                    "Upgrade-Insecure-Requests": "1",
-                    "Sec-Fetch-Dest": "document",
-                    "Sec-Fetch-Mode": "navigate",
-                    "Sec-Fetch-Site": "none",
                 },
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
             )
@@ -42,18 +40,17 @@ class TeraboxResolver:
             self._client = None
     
     async def resolve(self, share_url: str) -> FileMeta:
-        """Main resolve method based on anasty17's implementation"""
         async with self._lock:
             try:
                 await asyncio.sleep(random.uniform(1.0, 2.0))
                 
                 print(f"[TeraboxResolver] Resolving: {share_url}")
                 
-                # Extract direct download link using anasty17's method
-                download_url, filename, filesize = await self._terabox_extractor(share_url)
+                # Use wdzone API like anasty17's bot
+                download_url, filename, filesize = await self._wdzone_api_method(share_url)
                 
                 if download_url:
-                    print(f"[TeraboxResolver] ✅ SUCCESS: {filename}")
+                    print(f"[TeraboxResolver] ✅ SUCCESS via wdzone API")
                     return FileMeta(
                         name=filename or "terabox_file.mp4",
                         size=int(filesize) if filesize else None,
@@ -70,201 +67,89 @@ class TeraboxResolver:
                 else:
                     raise RuntimeError(f"Resolver error: {str(e)}")
     
-    async def _terabox_extractor(self, url: str):
-        """
-        Based on anasty17's direct_link_generator.py terabox implementation
-        This is the exact method used in the working mirror-leech-telegram-bot
-        """
+    async def _wdzone_api_method(self, url: str):
+        """Use wdzone API like anasty17's implementation"""
         try:
             client = await self.get_client()
             
-            # Step 1: Handle different URL formats
-            if "teraboxurl.com" in url:
-                url = url.replace("teraboxurl.com", "www.terabox.com")
-            elif "1024tera.com" in url:
-                url = url.replace("1024tera.com", "www.terabox.com")
-            elif "4funbox.com" in url:
-                url = url.replace("4funbox.com", "www.terabox.com")
-            elif "mirrobox.com" in url:
-                url = url.replace("mirrobox.com", "www.terabox.com")
-            elif "nephobox.com" in url:
-                url = url.replace("nephobox.com", "www.terabox.com")
+            # Clean URL format like your test
+            clean_url = url.strip()
             
-            print(f"[TeraboxResolver] Normalized URL: {url}")
+            print(f"[TeraboxResolver] 🌐 Calling wdzone API: {clean_url}")
             
-            # Step 2: Get the main page
-            response = await client.get(url, timeout=30)
-            response.raise_for_status()
+            # Call wdzone API
+            response = await client.get(
+                WDZONE_API,
+                params={"url": clean_url},
+                timeout=30
+            )
             
-            if "TeraBox" not in response.text:
-                raise Exception("Invalid TeraBox URL")
-            
-            # Step 3: Extract surl from URL or response
-            parsed_url = urlparse(response.url)
-            query_params = parse_qs(parsed_url.query)
-            
-            if "surl" in query_params:
-                surl = query_params["surl"][0]
-            else:
-                # Extract from path
-                path_parts = parsed_url.path.strip("/").split("/")
-                if "s" in path_parts:
-                    surl_index = path_parts.index("s") + 1
-                    if surl_index < len(path_parts):
-                        surl = path_parts[surl_index]
-                    else:
-                        raise Exception("Could not extract surl from URL")
-                else:
-                    raise Exception("Invalid TeraBox share URL format")
-            
-            print(f"[TeraboxResolver] Extracted surl: {surl}")
-            
-            # Step 4: Get file list using anasty17's method
-            list_url = "https://www.terabox.com/share/list"
-            list_params = {
-                "surl": surl,
-                "root": "1",
-                "fid": "",
-                "desc": "1",
-                "sort": "name",
-                "page": "1",
-                "num": "20",
-                "order": "time",
-                "site_referer": response.url,
-                "shorturl": surl,
-                "app_id": "250528",
-            }
-            
-            # Add required headers for API call
-            api_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Content-Type": "application/json;charset=UTF-8",
-                "Origin": "https://www.terabox.com",
-                "Referer": str(response.url),
-                "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-                "sec-ch-ua-mobile": "?0",
-                "sec-ch-ua-platform": '"Windows"',
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors", 
-                "Sec-Fetch-Site": "same-origin",
-            }
-            
-            # Make API request to get file list
-            list_response = await client.get(list_url, params=list_params, headers=api_headers, timeout=30)
-            
-            if list_response.status_code != 200:
-                print(f"[TeraboxResolver] List API returned: {list_response.status_code}")
-                raise Exception(f"Failed to get file list: {list_response.status_code}")
+            if response.status_code != 200:
+                print(f"[TeraboxResolver] ❌ API returned {response.status_code}")
+                return None, None, None
             
             try:
-                list_data = list_response.json()
+                data = response.json()
+                print(f"[TeraboxResolver] 📋 API Response: {data}")
             except json.JSONDecodeError:
-                raise Exception("Invalid JSON response from file list API")
+                print(f"[TeraboxResolver] ❌ Invalid JSON response")
+                return None, None, None
             
-            print(f"[TeraboxResolver] List API response keys: {list(list_data.keys())}")
+            # Check if API succeeded
+            status = data.get("✅ Status") or data.get("status")
+            if status != "Success":
+                print(f"[TeraboxResolver] ❌ API Status: {status}")
+                return None, None, None
             
-            # Step 5: Extract file information
-            if list_data.get("errno") != 0:
-                raise Exception(f"API Error: {list_data.get('errmsg', 'Unknown error')}")
+            # Extract file info
+            extracted_info = data.get("📜 Extracted Info")
             
-            file_list = list_data.get("list", [])
-            if not file_list:
-                raise Exception("No files found in share")
+            if not extracted_info or extracted_info is None:
+                print(f"[TeraboxResolver] ❌ No extracted info - link may be expired/invalid")
+                return None, None, None
             
-            # Get first file (anasty17's implementation takes first file)
-            first_file = file_list[0]
+            # Handle different response formats
+            if isinstance(extracted_info, list) and extracted_info:
+                file_info = extracted_info[0]
+            elif isinstance(extracted_info, dict):
+                file_info = extracted_info
+            else:
+                print(f"[TeraboxResolver] ❌ Unexpected extracted_info format: {type(extracted_info)}")
+                return None, None, None
             
-            filename = first_file.get("server_filename", "terabox_file")
-            filesize = first_file.get("size")
-            fs_id = first_file.get("fs_id")
+            # Extract download data
+            download_url = (
+                file_info.get("🔽 Direct Download Link") or
+                file_info.get("download_url") or
+                file_info.get("downloadUrl") or 
+                file_info.get("url") or
+                file_info.get("dlink")
+            )
             
-            if not fs_id:
-                raise Exception("Could not get file ID")
+            filename = (
+                file_info.get("📂 Title") or
+                file_info.get("title") or
+                file_info.get("name") or
+                file_info.get("filename") or
+                "terabox_file"
+            )
             
-            print(f"[TeraboxResolver] File info - Name: {filename}, Size: {filesize}, ID: {fs_id}")
-            
-            # Step 6: Get download link using anasty17's method
-            download_url = await self._get_download_link(client, surl, fs_id, str(response.url))
+            filesize = (
+                file_info.get("size") or
+                file_info.get("filesize") or
+                file_info.get("file_size")
+            )
             
             if download_url:
+                print(f"[TeraboxResolver] ✅ Extracted: {filename} ({filesize} bytes)")
                 return download_url, filename, filesize
             else:
-                raise Exception("Could not extract download URL")
+                print(f"[TeraboxResolver] ❌ No download URL in response")
+                return None, None, None
                 
         except Exception as e:
-            print(f"[TeraboxResolver] Extraction error: {e}")
+            print(f"[TeraboxResolver] ❌ wdzone API error: {e}")
             return None, None, None
-    
-    async def _get_download_link(self, client, surl, fs_id, referer_url):
-        """Get direct download link using anasty17's method"""
-        try:
-            # This is anasty17's working method for getting download links
-            download_api_url = "https://www.terabox.com/share/download"
-            
-            download_params = {
-                "surl": surl,
-                "fid": fs_id,
-                "type": "nolimit",
-                "sign": "",
-                "timestamp": "",
-                "app_id": "250528",
-            }
-            
-            download_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Accept-Encoding": "gzip, deflate, br",
-                "Content-Type": "application/json;charset=UTF-8",
-                "Origin": "https://www.terabox.com",
-                "Referer": referer_url,
-                "sec-ch-ua": '"Not A(Brand";v="99", "Google Chrome";v="121", "Chromium";v="121"',
-                "sec-ch-ua-mobile": "?0", 
-                "sec-ch-ua-platform": '"Windows"',
-                "Sec-Fetch-Dest": "empty",
-                "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-            }
-            
-            download_response = await client.get(download_api_url, params=download_params, headers=download_headers, timeout=30)
-            
-            if download_response.status_code != 200:
-                print(f"[TeraboxResolver] Download API returned: {download_response.status_code}")
-                return None
-            
-            try:
-                download_data = download_response.json()
-            except json.JSONDecodeError:
-                print(f"[TeraboxResolver] Invalid JSON from download API")
-                return None
-            
-            print(f"[TeraboxResolver] Download API response keys: {list(download_data.keys())}")
-            
-            if download_data.get("errno") != 0:
-                print(f"[TeraboxResolver] Download API error: {download_data.get('errmsg')}")
-                return None
-            
-            # Extract download URL
-            dlink = download_data.get("dlink")
-            if dlink:
-                # Decode any escaped characters
-                try:
-                    dlink = dlink.encode().decode('unicode_escape')
-                except:
-                    pass
-                
-                print(f"[TeraboxResolver] ✅ Got download URL: {dlink[:100]}...")
-                return dlink
-            
-            print(f"[TeraboxResolver] No dlink in response")
-            return None
-            
-        except Exception as e:
-            print(f"[TeraboxResolver] Download link error: {e}")
-            return None
 
 # Global resolver instance
 _resolver_instance = None
@@ -280,4 +165,4 @@ async def cleanup_resolver():
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
-            
+                    
