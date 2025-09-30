@@ -83,14 +83,13 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
     duration = None
     thumb = None
     try:
-        if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime and mime.startswith("video/")):
+        if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime.startswith("video/")):
             duration = _probe_duration_seconds(path)
             thumb = _make_video_thumb(path)
     except Exception:
         pass
 
     try:
-        # Video
         if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v", ".mkv"):
             await context.bot.send_video(
                 chat_id=chat_id,
@@ -103,7 +102,6 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
                 thumbnail=open(thumb, "rb") if thumb else None,
             )
             return
-        # Audio
         if (mime and mime.startswith("audio/")) or ext in (".mp3",".m4a",".aac",".flac",".ogg",".opus"):
             await context.bot.send_audio(
                 chat_id=chat_id,
@@ -113,7 +111,6 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
                 thumbnail=open(thumb, "rb") if thumb else None,
             )
             return
-        # Image
         if (mime and mime.startswith("image/")) or ext in (".jpg",".jpeg",".png",".webp"):
             await context.bot.send_photo(
                 chat_id=chat_id,
@@ -121,7 +118,6 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
                 caption=caption,
             )
             return
-        # Fallback document
         await context.bot.send_document(
             chat_id=chat_id,
             document=open(path, "rb"),
@@ -135,7 +131,7 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
         except Exception:
             pass
 
-# ---------- Resolver and handler ----------
+# ---------- Handler ----------
 resolver_v2 = TeraboxResolver()
 
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -240,9 +236,8 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-# Backward compat
 leech_handler = leech_handler_v2
 
 def get_enhanced_handler():
     return CommandHandler("leech", leech_handler_v2)
-        
+                      
