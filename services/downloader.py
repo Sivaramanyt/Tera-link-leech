@@ -1,4 +1,4 @@
-# services/downloader.py
+# Enhanced services/downloader.py - ULTRA-EXTREME VERSION
 
 import asyncio
 import tempfile
@@ -25,13 +25,13 @@ class DownloadError(Exception):
 async def fetch_to_temp(
     meta: FileMeta,
     on_progress: Optional[Callable[[int, Optional[int]], None]] = None,
-    max_retries: int = 15,  # Increased retries for unstable servers
+    max_retries: int = 25,  # EXTREME: 25 attempts
     base_chunk_size: int = None
 ) -> tuple[str, FileMeta]:
     """
-    ULTRA-AGGRESSIVE downloader for unstable Terabox servers with immediate retry strategy
+    ULTRA-EXTREME downloader for maximally unstable Terabox servers
     """
-    logger.info(f"🚀 Starting ULTRA-AGGRESSIVE download: {meta.name} ({meta.size} bytes)")
+    logger.info(f"🚀 Starting ULTRA-EXTREME download: {meta.name} ({meta.size} bytes)")
     
     # Create temp file
     fd, temp_path = tempfile.mkstemp(
@@ -44,46 +44,52 @@ async def fetch_to_temp(
     downloaded = 0
     retry_count = 0
     download_start_time = time.time()
-    
-    # Track partial downloads for resume
-    resume_ranges = []
+    successful_chunks = 0
     
     while retry_count < max_retries:
         try:
-            # ULTRA-AGGRESSIVE: Start with small chunks, increase if stable
-            if retry_count < 3:
-                chunk_size = 65536   # 64KB - very small for unstable connections
-            elif retry_count < 6:
-                chunk_size = 131072  # 128KB
+            # ULTRA-EXTREME: Even smaller chunks on more retries
+            if retry_count < 5:
+                chunk_size = 32768   # 32KB - very small
+            elif retry_count < 10:
+                chunk_size = 16384   # 16KB - extremely small
+            elif retry_count < 15:
+                chunk_size = 8192    # 8KB - ultra small
             else:
-                chunk_size = 32768   # 32KB - fallback to your original size
+                chunk_size = 4096    # 4KB - minimal chunks
             
-            logger.info(f"🚀 ULTRA attempt #{retry_count + 1}/{max_retries} - Chunk: {chunk_size//1024}KB")
+            logger.info(f"🚀 ULTRA-EXTREME attempt #{retry_count + 1}/{max_retries} - Chunk: {chunk_size//1024 if chunk_size >= 1024 else chunk_size}{'KB' if chunk_size >= 1024 else 'B'}")
             
-            # ULTRA-AGGRESSIVE HTTP settings - fastest possible failure detection
+            # ULTRA-EXTREME HTTP settings - fastest possible failure
             timeout = httpx.Timeout(
-                timeout=30.0,      # Much faster total timeout
-                connect=5.0,       # Ultra-fast connection timeout
-                read=10.0,         # Ultra-fast read timeout
-                write=5.0,         # Ultra-fast write timeout
-                pool=5.0           # Ultra-fast pool timeout
+                timeout=20.0,      # Even faster total timeout
+                connect=3.0,       # Ultra-fast connection
+                read=8.0,          # Ultra-fast read
+                write=3.0,         # Ultra-fast write
+                pool=3.0           # Ultra-fast pool
             )
             
-            # Multiple user agents to avoid rate limiting
+            # Rotating user agents for each attempt
             user_agents = [
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0",
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
             ]
             
             headers = {
                 "User-Agent": user_agents[retry_count % len(user_agents)],
                 "Accept": "*/*",
-                "Accept-Encoding": "identity",  # Disable compression for speed
-                "Connection": "close",          # Force new connection each time
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "identity",  # No compression for speed
+                "Connection": "close",          # Force fresh connection
                 "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Pragma": "no-cache",
-                "DNT": "1"
+                "DNT": "1",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site"
             }
             
             # Add resume header if we have partial data
@@ -91,31 +97,33 @@ async def fetch_to_temp(
                 headers["Range"] = f"bytes={downloaded}-"
                 logger.info(f"📊 RESUMING from byte {downloaded:,}")
             
-            # Use fresh client with aggressive settings
+            # ULTRA-EXTREME: Fresh client every time with no connection reuse
             async with httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=True,
                 limits=httpx.Limits(
-                    max_keepalive_connections=0,  # No keepalive - fresh connections
+                    max_keepalive_connections=0,  # No keepalive
                     max_connections=1,            # Single connection
-                    keepalive_expiry=0            # No connection reuse
+                    keepalive_expiry=0            # No reuse
                 ),
-                headers=headers
+                headers=headers,
+                http2=False  # Force HTTP/1.1 for better compatibility
             ) as client:
                 
-                logger.info(f"🌐 Connecting to: {meta.url[:80]}...")
+                logger.info(f"🌐 Connecting (attempt {retry_count + 1})...")
                 
                 # Start streaming request
                 async with client.stream("GET", meta.url) as response:
                     logger.info(f"📡 Response: {response.status_code}")
                     
-                    # Handle status codes aggressively
+                    # Handle status codes
                     if response.status_code not in [200, 206]:
-                        if response.status_code in [404, 403]:
+                        if response.status_code in [404, 403, 410]:
                             raise DownloadError(f"File not accessible (HTTP {response.status_code})")
                         else:
-                            logger.warning(f"⚠️ Unexpected status {response.status_code}, retrying...")
+                            logger.warning(f"⚠️ Status {response.status_code}, will retry...")
                             retry_count += 1
+                            await asyncio.sleep(0.2)  # Very brief delay
                             continue
                     
                     # Get content info
@@ -131,18 +139,19 @@ async def fetch_to_temp(
                     else:
                         expected_total = meta.size or 0
                     
-                    logger.info(f"📏 Expecting {expected_total:,} bytes total, downloading from {downloaded:,}")
+                    logger.info(f"📏 Target: {expected_total:,} bytes total, from: {downloaded:,}")
                     
                     # Open file for writing
                     mode = "ab" if downloaded > 0 else "wb"
                     bytes_this_attempt = 0
-                    last_progress_time = time.time()
-                    stall_timeout = 5.0  # 5 second stall timeout
+                    last_data_time = time.time()
+                    stall_timeout = 3.0  # 3 second stall timeout (reduced)
                     
                     try:
                         with open(temp_path, mode) as f:
-                            logger.info(f"📝 Writing to: {temp_path}")
+                            logger.info(f"📝 Writing (attempt {retry_count + 1})...")
                             
+                            chunk_count = 0
                             async for chunk in response.aiter_bytes(chunk_size):
                                 current_time = time.time()
                                 
@@ -150,96 +159,98 @@ async def fetch_to_temp(
                                     continue
                                 
                                 f.write(chunk)
+                                f.flush()  # Force write to disk
                                 downloaded += len(chunk)
                                 bytes_this_attempt += len(chunk)
+                                chunk_count += 1
+                                successful_chunks += 1
+                                last_data_time = current_time
                                 
-                                # ULTRA-AGGRESSIVE progress reporting (every 512KB)
-                                if downloaded % (512 * 1024) == 0:
+                                # Progress reporting every 256KB or every 64 chunks
+                                if downloaded % (256 * 1024) == 0 or chunk_count % 64 == 0:
                                     if on_progress:
                                         try:
                                             on_progress(downloaded, expected_total)
                                         except Exception:
                                             pass
-                                    
-                                    # Check for stalls
-                                    if current_time - last_progress_time > stall_timeout:
-                                        logger.warning(f"⚠️ Download stalled for {stall_timeout}s, breaking to retry")
-                                        break
-                                    
-                                    last_progress_time = current_time
                                 
-                                # Speed logging every 2MB
-                                if bytes_this_attempt > 0 and bytes_this_attempt % (2 * 1024 * 1024) == 0:
-                                    attempt_elapsed = current_time - (download_start_time + (retry_count * 2))
+                                # Check for stalls
+                                if current_time - last_data_time > stall_timeout:
+                                    logger.warning(f"⚠️ Stalled for {stall_timeout}s, breaking...")
+                                    break
+                                
+                                # Speed logging every 1MB
+                                if bytes_this_attempt > 0 and bytes_this_attempt % (1024 * 1024) == 0:
+                                    attempt_elapsed = current_time - (download_start_time + (retry_count * 0.5))
                                     if attempt_elapsed > 0:
                                         speed = bytes_this_attempt / attempt_elapsed
-                                        logger.info(f"🚀 Speed: {format_speed(speed)}, Downloaded: {downloaded:,}/{expected_total:,}")
+                                        logger.info(f"🚀 Speed: {format_speed(speed)}, Progress: {downloaded:,}/{expected_total:,}")
                             
                             # Check completion
                             if expected_total and downloaded >= expected_total:
                                 total_elapsed = time.time() - download_start_time
                                 avg_speed = downloaded / total_elapsed if total_elapsed > 0 else 0
-                                logger.info(f"✅ ULTRA download completed: {downloaded:,} bytes in {total_elapsed:.1f}s")
-                                logger.info(f"🚀 Average speed: {format_speed(avg_speed)}")
+                                logger.info(f"✅ ULTRA-EXTREME download SUCCESS: {downloaded:,} bytes in {total_elapsed:.1f}s")
+                                logger.info(f"🚀 Final speed: {format_speed(avg_speed)} ({successful_chunks} successful chunks)")
                                 break
                             elif bytes_this_attempt > 0:
-                                # Made progress, continue with next attempt
+                                # Made progress, quick retry
                                 logger.info(f"📊 Progress: {downloaded:,}/{expected_total:,} bytes ({(downloaded/expected_total)*100:.1f}%)")
-                                # Short delay before retry
-                                await asyncio.sleep(0.5)
                                 retry_count += 1
+                                await asyncio.sleep(0.1)  # Minimal delay
                                 continue
                             else:
                                 # No progress made
-                                logger.warning(f"⚠️ No data received on attempt {retry_count + 1}")
-                                raise DownloadError("No data received from server")
+                                logger.warning(f"⚠️ No data on attempt {retry_count + 1}")
+                                retry_count += 1
+                                await asyncio.sleep(0.3)
+                                continue
                     
                     except Exception as write_error:
                         logger.warning(f"⚠️ Write error: {write_error}")
                         retry_count += 1
+                        await asyncio.sleep(0.2)
                         continue
                         
         except (httpx.TimeoutException, httpx.ConnectTimeout, httpx.ReadTimeout) as e:
             retry_count += 1
-            logger.warning(f"⏰ Timeout on attempt {retry_count}: {e}")
+            logger.warning(f"⏰ Timeout #{retry_count}: {e}")
             
-            # ULTRA-FAST retry - no waiting for timeouts
-            if retry_count < max_retries:
-                logger.info(f"⚡ INSTANT retry #{retry_count + 1}...")
-                await asyncio.sleep(0.1)  # Tiny delay
-                continue
+            # ULTRA-FAST retry for timeouts
+            await asyncio.sleep(0.05)  # 50ms delay
+            continue
                 
         except (httpx.HTTPError, httpx.RemoteProtocolError) as e:
             retry_count += 1
             error_msg = str(e).lower()
             
             if "peer closed connection" in error_msg:
-                logger.info(f"🔄 Server dropped connection (attempt {retry_count}) - INSTANT retry")
-                # INSTANT retry for peer closed errors
-                await asyncio.sleep(0.1)
+                logger.info(f"🔄 Server drop #{retry_count} - INSTANT retry")
+                await asyncio.sleep(0.02)  # 20ms delay
                 continue
             else:
-                logger.warning(f"🌐 HTTP error (attempt {retry_count}): {e}")
-                if retry_count < max_retries:
-                    await asyncio.sleep(0.5)
-                    continue
+                logger.warning(f"🌐 HTTP error #{retry_count}: {e}")
+                await asyncio.sleep(0.1)
+                continue
                 
         except Exception as e:
             retry_count += 1
-            logger.error(f"❌ Unexpected error (attempt {retry_count}): {e}")
-            if retry_count < max_retries:
-                await asyncio.sleep(1.0)
-                continue
+            logger.error(f"❌ Error #{retry_count}: {e}")
+            await asyncio.sleep(0.5)
+            continue
     
-    # Check final result
+    # Final result check
     if retry_count >= max_retries:
-        logger.error(f"❌ ULTRA download failed after {max_retries} attempts")
+        logger.error(f"❌ ULTRA-EXTREME download failed after {max_retries} attempts")
+        logger.info(f"📊 Achieved {successful_chunks} successful chunks, {downloaded:,} bytes partial progress")
+        
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
             except:
                 pass
-        raise DownloadError(f"Download failed after {max_retries} attempts - Terabox servers extremely unstable")
+        
+        raise DownloadError(f"Download failed after {max_retries} attempts - Terabox servers extremely unstable. Try a different link or wait for servers to stabilize.")
     
     # Verify file
     if not os.path.exists(temp_path):
@@ -256,8 +267,8 @@ async def fetch_to_temp(
     # Success
     total_elapsed = time.time() - download_start_time
     avg_speed = file_size / total_elapsed if total_elapsed > 0 else 0
-    logger.info(f"✅ ULTRA download SUCCESS: {temp_path} ({file_size:,} bytes)")
-    logger.info(f"🚀 Final speed: {format_speed(avg_speed)} over {total_elapsed:.1f}s with {retry_count} attempts")
+    logger.info(f"✅ ULTRA-EXTREME SUCCESS: {temp_path} ({file_size:,} bytes)")
+    logger.info(f"🚀 Final stats: {format_speed(avg_speed)}, {retry_count} attempts, {successful_chunks} chunks")
     
     meta.size = file_size
     return temp_path, meta
