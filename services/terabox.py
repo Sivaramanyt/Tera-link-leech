@@ -12,6 +12,14 @@ import io
 from urllib.parse import urlparse, parse_qs
 from services.downloader import FileMeta
 
+# Try to import brotli
+try:
+    import brotli
+    HAS_BROTLI = True
+except ImportError:
+    HAS_BROTLI = False
+    print("⚠️ WARNING: brotli not installed. Brotli decompression will not work.")
+
 logger = logging.getLogger(__name__)
 
 # The API that works
@@ -108,9 +116,9 @@ class TeraboxResolver:
             return None
     
     def _decode_response_content(self, response):
-        """Safely decode response content handling different encodings"""
+        """Safely decode response content handling different encodings including Brotli"""
         try:
-            # Check if response is compressed
+            # Check content encoding
             content_encoding = response.headers.get('content-encoding', '').lower()
             logger.info(f"📦 Content-Encoding: {content_encoding}")
             logger.info(f"📦 Content-Type: {response.headers.get('content-type', 'unknown')}")
@@ -119,8 +127,24 @@ class TeraboxResolver:
             logger.info(f"📦 Raw content length: {len(raw_content)} bytes")
             logger.info(f"📦 First 20 bytes: {raw_content[:20]}")
             
-            # Try different decompression methods
-            if content_encoding == 'gzip' or raw_content.startswith(b'\x1f\x8b'):
+            # Handle Brotli compression (this is what we need!)
+            if content_encoding == 'br':
+                logger.info(f"🗜️ Decompressing Brotli content...")
+                if HAS_BROTLI:
+                    try:
+                        decompressed = brotli.decompress(raw_content)
+                        logger.info(f"✅ Brotli decompressed: {len(decompressed)} bytes")
+                        decoded = decompressed.decode('utf-8')
+                        logger.info(f"✅ Brotli->UTF-8 decoded: {len(decoded)} chars")
+                        return decoded
+                    except Exception as e:
+                        logger.error(f"❌ Brotli decompression failed: {e}")
+                else:
+                    logger.error(f"❌ Brotli compression detected but brotli package not installed!")
+                    return None
+            
+            # Handle Gzip compression
+            elif content_encoding == 'gzip' or raw_content.startswith(b'\x1f\x8b'):
                 logger.info(f"🗜️ Decompressing gzip content...")
                 try:
                     decompressed = gzip.decompress(raw_content)
@@ -134,20 +158,28 @@ class TeraboxResolver:
                 try:
                     decoded = raw_content.decode(encoding)
                     logger.info(f"✅ Decoded with {encoding}: {len(decoded)} chars")
-                    return decoded
+                    # Only return if it looks like valid JSON
+                    if decoded.strip().startswith('{'):
+                        return decoded
+                    else:
+                        logger.warning(f"⚠️ {encoding} decoded but doesn't look like JSON")
+                        continue
                 except UnicodeDecodeError as e:
                     logger.warning(f"⚠️ {encoding} decoding failed: {e}")
                     continue
             
-            # Try using httpx's built-in text property
+            # Try using httpx's built-in text property as last resort
             try:
                 text = response.text
                 logger.info(f"✅ Using response.text: {len(text)} chars")
-                return text
+                if text.strip().startswith('{'):
+                    return text
+                else:
+                    logger.warning(f"⚠️ response.text doesn't look like JSON")
             except Exception as e:
                 logger.warning(f"⚠️ response.text failed: {e}")
             
-            # Last resort: try to interpret as binary data
+            # Last resort failed
             logger.error(f"❌ All decoding methods failed")
             return None
             
@@ -156,7 +188,7 @@ class TeraboxResolver:
             return None
     
     async def _wdzone_api_method(self, url: str):
-        """Use wdzone API with proper response handling"""
+        """Use wdzone API with proper Brotli response handling"""
         try:
             client = await self.get_client()
             
@@ -177,7 +209,7 @@ class TeraboxResolver:
                 logger.error(f"❌ API returned {response.status_code}")
                 return None, None, None
             
-            # Decode the response content properly
+            # Decode the response content properly (including Brotli!)
             text_content = self._decode_response_content(response)
             if not text_content:
                 logger.error(f"❌ Could not decode response content")
@@ -264,4 +296,4 @@ async def cleanup_resolver():
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
-                    
+            
