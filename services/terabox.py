@@ -6,10 +6,13 @@ import re
 import httpx
 import random
 import time
+import logging
 from urllib.parse import urlparse, parse_qs
 from services.downloader import FileMeta
 
-# The API that anasty17's bot actually uses
+logger = logging.getLogger(__name__)
+
+# The API that works
 WDZONE_API = "https://wdzone-terabox-api.vercel.app/api"
 
 class TeraboxResolver:
@@ -29,6 +32,7 @@ class TeraboxResolver:
                     "Accept-Encoding": "gzip, deflate, br",
                     "DNT": "1",
                     "Connection": "keep-alive",
+                    "Referer": "https://www.terabox.com/",
                 },
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
             )
@@ -44,38 +48,38 @@ class TeraboxResolver:
             try:
                 await asyncio.sleep(random.uniform(1.0, 2.0))
                 
-                print(f"[TeraboxResolver] Resolving: {share_url}")
+                logger.info(f"🌐 TeraboxResolver: Processing {share_url}")
                 
-                # Use wdzone API like anasty17's bot
+                # Use wdzone API
                 download_url, filename, filesize = await self._wdzone_api_method(share_url)
                 
                 if download_url:
-                    print(f"[TeraboxResolver] ✅ SUCCESS via wdzone API")
+                    logger.info(f"✅ TeraboxResolver: SUCCESS - {filename} ({filesize} bytes)")
                     return FileMeta(
                         name=filename or "terabox_file.mp4",
                         size=int(filesize) if filesize else None,
                         url=download_url
                     )
                 
+                logger.error(f"❌ TeraboxResolver: No download URL found")
                 raise RuntimeError("Link expired or invalid. Please get a fresh link from Terabox.")
                 
             except Exception as e:
                 await self.close()
                 error_msg = str(e).lower()
+                logger.error(f"❌ TeraboxResolver: Error - {e}")
                 if any(x in error_msg for x in ["expired", "invalid", "private"]):
                     raise RuntimeError("Link expired or invalid. Please get a fresh link from Terabox.")
                 else:
                     raise RuntimeError(f"Resolver error: {str(e)}")
     
     async def _wdzone_api_method(self, url: str):
-        """Use wdzone API like anasty17's implementation"""
+        """Use wdzone API with detailed logging"""
         try:
             client = await self.get_client()
             
-            # Clean URL format like your test
             clean_url = url.strip()
-            
-            print(f"[TeraboxResolver] 🌐 Calling wdzone API: {clean_url}")
+            logger.info(f"🌐 Calling wdzone API with: {clean_url}")
             
             # Call wdzone API
             response = await client.get(
@@ -84,38 +88,48 @@ class TeraboxResolver:
                 timeout=30
             )
             
+            logger.info(f"📡 API Response Status: {response.status_code}")
+            
             if response.status_code != 200:
-                print(f"[TeraboxResolver] ❌ API returned {response.status_code}")
+                logger.error(f"❌ API returned {response.status_code}")
                 return None, None, None
             
             try:
                 data = response.json()
-                print(f"[TeraboxResolver] 📋 API Response: {data}")
+                logger.info(f"📋 Full API Response: {json.dumps(data, indent=2)}")
             except json.JSONDecodeError:
-                print(f"[TeraboxResolver] ❌ Invalid JSON response")
+                logger.error(f"❌ Invalid JSON response")
                 return None, None, None
             
-            # Check if API succeeded
+            # Check API status
             status = data.get("✅ Status") or data.get("status")
+            logger.info(f"📊 API Status: {status}")
+            
             if status != "Success":
-                print(f"[TeraboxResolver] ❌ API Status: {status}")
+                logger.error(f"❌ API Status not Success: {status}")
                 return None, None, None
             
             # Extract file info
             extracted_info = data.get("📜 Extracted Info")
+            logger.info(f"📝 Extracted Info: {extracted_info}")
             
             if not extracted_info or extracted_info is None:
-                print(f"[TeraboxResolver] ❌ No extracted info - link may be expired/invalid")
+                logger.error(f"❌ No extracted info - Link is likely expired/invalid")
+                logger.error(f"❌ This means the Terabox link has expired or is not accessible")
                 return None, None, None
             
             # Handle different response formats
             if isinstance(extracted_info, list) and extracted_info:
                 file_info = extracted_info[0]
+                logger.info(f"📁 Processing first file from list")
             elif isinstance(extracted_info, dict):
                 file_info = extracted_info
+                logger.info(f"📁 Processing single file dict")
             else:
-                print(f"[TeraboxResolver] ❌ Unexpected extracted_info format: {type(extracted_info)}")
+                logger.error(f"❌ Unexpected extracted_info format: {type(extracted_info)}")
                 return None, None, None
+            
+            logger.info(f"📁 File info keys: {list(file_info.keys())}")
             
             # Extract download data
             download_url = (
@@ -140,15 +154,16 @@ class TeraboxResolver:
                 file_info.get("file_size")
             )
             
+            logger.info(f"📄 Extracted - URL: {download_url is not None}, Name: {filename}, Size: {filesize}")
+            
             if download_url:
-                print(f"[TeraboxResolver] ✅ Extracted: {filename} ({filesize} bytes)")
                 return download_url, filename, filesize
             else:
-                print(f"[TeraboxResolver] ❌ No download URL in response")
+                logger.error(f"❌ No download URL found in file info")
                 return None, None, None
                 
         except Exception as e:
-            print(f"[TeraboxResolver] ❌ wdzone API error: {e}")
+            logger.error(f"❌ wdzone API exception: {e}")
             return None, None, None
 
 # Global resolver instance
