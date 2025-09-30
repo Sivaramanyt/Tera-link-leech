@@ -138,9 +138,12 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
     print(f"[downloader] workers={DEFAULT_MAX_WORKERS} start_chunk={START_CHUNK} min_chunk={MIN_CHUNK}")
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        # First probe may redirect to the final asset host
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
+
+        final_url = str(r0.url)  # use the redirected, signed data host for all subsequent requests
 
         ctype = (r0.headers.get("content-type") or "").lower()
         if "text/html" in ctype or "text/plain" in ctype:
@@ -168,14 +171,14 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             if "filename=" in cd:
                 meta.name = cd.split("filename=")[-1].strip('"; ')
             else:
-                meta.name = _name_from_url(str(r0.url)) or "file"
+                meta.name = _name_from_url(final_url) or "file"
 
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
         if size is None:
             written = 0
-            r = await client.get(url, headers=_headers_for(url))
+            r = await client.get(final_url, headers=_headers_for(final_url))
             r.raise_for_status()
             with open(path, "wb") as f:
                 async for chunk in r.aiter_bytes():
@@ -190,12 +193,13 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 meta.size = written
             return path, meta
 
-        # Warm-up on final URL/host to seed cookies and edge selection
-        warm = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
+        # Warm-up tiny range on the exact final URL host to seed cookies/edge
+        warm = await client.get(final_url, headers=_headers_for(final_url, "bytes=0-0"))
         if warm.status_code not in (200, 206):
             raise RuntimeError(f"Warm-up failed with HTTP {warm.status_code}")
 
-        await download_parallel(client, url, size, path, _headers_for, on_progress, workers=DEFAULT_MAX_WORKERS)
+        # Parallel segmented download on the final host
+        await download_parallel(client, final_url, size, path, _headers_for, on_progress, workers=DEFAULT_MAX_WORKERS)
 
         if meta.size is None:
             try:
@@ -204,3 +208,4 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 pass
 
         return path, meta
+                               
