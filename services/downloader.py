@@ -52,20 +52,15 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
         h["Range"] = range_hdr
     return h
 
-# ---------------- Parallel segmented downloader ----------------
-DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "3"))  # stable default; raise to 4–6 after confirming
-MIN_CHUNK = 128 * 1024        # 128 KiB to handle tiny tail fragments
-START_CHUNK = 256 * 1024      # starts modest; adapts down on errors
-BASE_BACKOFF = 0.25           # seconds
-MAX_BACKOFF = 2.0             # seconds
+DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "3"))
+MIN_CHUNK = 128 * 1024
+START_CHUNK = 256 * 1024
+BASE_BACKOFF = 0.25
+MAX_BACKOFF = 2.0
 
 async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int,
                        headers_fn, attempt_chunk: int, on_progress, total_size: int,
                        fhandle, write_offset: int):
-    """
-    Fetch a byte range [start, end] with retries; write directly at correct offset.
-    Handles 5xx with backoff, resumes within the slice, and halves subrequest size on errors.
-    """
     cur_start = start
     cur_chunk = attempt_chunk
     backoff = BASE_BACKOFF
@@ -74,29 +69,23 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
         cur_end = min(end, cur_start + cur_chunk - 1)
         try:
             rr = await client.get(url, headers=headers_fn(f"bytes={cur_start}-{cur_end}"))
-
-            # 5xx transient errors: backoff and retry smaller slice
             if 500 <= rr.status_code < 600:
                 await asyncio.sleep(backoff)
                 backoff = min(MAX_BACKOFF, backoff * 2)
                 cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
                 continue
-
             if rr.status_code not in (200, 206):
                 raise RuntimeError(f"HTTP {rr.status_code}")
 
             data = rr.content
             if not data:
-                # Treat empty body as transient short read
                 await asyncio.sleep(backoff)
                 backoff = min(MAX_BACKOFF, backoff * 2)
                 cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
                 continue
 
-            # Success: reset backoff
             backoff = BASE_BACKOFF
 
-            # Write at exact offset
             fhandle.seek(write_offset + (cur_start - start))
             fhandle.write(data)
 
@@ -118,16 +107,11 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
 
 async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path: str,
                             headers_fn, on_progress=None, workers: Optional[int] = None):
-    """
-    Download file in parallel byte ranges to 'path' with up to 'workers' tasks.
-    """
     workers = workers or DEFAULT_MAX_WORKERS
 
-    # Pre-allocate file
     with open(path, "wb") as f:
         f.truncate(size)
 
-    # Balanced segments over the file
     base_seg = max(START_CHUNK * 8, size // max(1, workers * 16))
     segments = []
     s = 0
@@ -148,19 +132,12 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
 
     await asyncio.gather(*(run_seg(i, rng) for i, rng in enumerate(segments)))
 
-# ---------------- Entry point ----------------
 async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) -> tuple[str, FileMeta]:
-    """
-    Download to a temp file with CDN-friendly headers and parallel ranged GET.
-    on_progress: optional callable(done_bytes:int, total_bytes:int|0)
-    """
     url = meta.url
 
-    # Deployment banner for quick verification in logs
     print(f"[downloader] workers={DEFAULT_MAX_WORKERS} start_chunk={START_CHUNK} min_chunk={MIN_CHUNK}")
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Initial probe on provided URL (often redirector) to discover size/name and avoid HEAD 403
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -169,7 +146,6 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
         if "text/html" in ctype or "text/plain" in ctype:
             raise RuntimeError("Resolved URL returned HTML/text, not a file")
 
-        # Determine total size
         size = meta.size
         content_range = r0.headers.get("content-range")
         if size is None:
@@ -187,7 +163,6 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                         size = None
         meta.size = size
 
-        # Determine name
         if not meta.name:
             cd = r0.headers.get("content-disposition", "")
             if "filename=" in cd:
@@ -195,11 +170,9 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             else:
                 meta.name = _name_from_url(str(r0.url)) or "file"
 
-        # Prepare output file
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
-        # If size unknown, stream single GET
         if size is None:
             written = 0
             r = await client.get(url, headers=_headers_for(url))
@@ -217,15 +190,13 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 meta.size = written
             return path, meta
 
-        # Warm-up tiny range on the exact final URL host to seed cookies/edge selection
+        # Warm-up on final URL/host to seed cookies and edge selection
         warm = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if warm.status_code not in (200, 206):
             raise RuntimeError(f"Warm-up failed with HTTP {warm.status_code}")
 
-        # Parallel segmented download
         await download_parallel(client, url, size, path, _headers_for, on_progress, workers=DEFAULT_MAX_WORKERS)
 
-        # Finalize
         if meta.size is None:
             try:
                 meta.size = os.path.getsize(path)
@@ -233,4 +204,3 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 pass
 
         return path, meta
-                           
