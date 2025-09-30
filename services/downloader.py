@@ -53,9 +53,9 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
     return h
 
 # ---------------- Parallel segmented downloader ----------------
-DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "3"))  # start with 3 for stability; raise to 4–6 later
-MIN_CHUNK = 128 * 1024        # 128 KiB for fine-grained resumes
-START_CHUNK = 256 * 1024      # initial subrequest size; adapts down on errors
+DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "3"))  # stable default; raise to 4–6 after confirming
+MIN_CHUNK = 128 * 1024        # 128 KiB to handle tiny tail fragments
+START_CHUNK = 256 * 1024      # starts modest; adapts down on errors
 BASE_BACKOFF = 0.25           # seconds
 MAX_BACKOFF = 2.0             # seconds
 
@@ -93,10 +93,10 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
                 cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
                 continue
 
-            # Success path: reset backoff
+            # Success: reset backoff
             backoff = BASE_BACKOFF
 
-            # Write at exact offset for this segment
+            # Write at exact offset
             fhandle.seek(write_offset + (cur_start - start))
             fhandle.write(data)
 
@@ -111,7 +111,6 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
             continue
 
         except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError):
-            # Network/stream error: backoff and shrink
             await asyncio.sleep(backoff)
             backoff = min(MAX_BACKOFF, backoff * 2)
             cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
@@ -128,7 +127,7 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
     with open(path, "wb") as f:
         f.truncate(size)
 
-    # Balanced segments
+    # Balanced segments over the file
     base_seg = max(START_CHUNK * 8, size // max(1, workers * 16))
     segments = []
     s = 0
@@ -157,11 +156,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
     """
     url = meta.url
 
-    # Deployment banner for logs (sanity check)
+    # Deployment banner for quick verification in logs
     print(f"[downloader] workers={DEFAULT_MAX_WORKERS} start_chunk={START_CHUNK} min_chunk={MIN_CHUNK}")
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Probe tiny range to discover size and avoid HEAD 403
+        # Initial probe on provided URL (often redirector) to discover size/name and avoid HEAD 403
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -196,11 +195,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             else:
                 meta.name = _name_from_url(str(r0.url)) or "file"
 
-        # Prepare output
+        # Prepare output file
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
-        # Unknown length: single stream fallback
+        # If size unknown, stream single GET
         if size is None:
             written = 0
             r = await client.get(url, headers=_headers_for(url))
@@ -218,6 +217,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 meta.size = written
             return path, meta
 
+        # Warm-up tiny range on the exact final URL host to seed cookies/edge selection
+        warm = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
+        if warm.status_code not in (200, 206):
+            raise RuntimeError(f"Warm-up failed with HTTP {warm.status_code}")
+
         # Parallel segmented download
         await download_parallel(client, url, size, path, _headers_for, on_progress, workers=DEFAULT_MAX_WORKERS)
 
@@ -229,4 +233,4 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 pass
 
         return path, meta
-            
+                           
