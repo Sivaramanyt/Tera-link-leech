@@ -52,10 +52,10 @@ def _headers_for(url: str, range_hdr: str | None = None) -> dict:
         h["Range"] = range_hdr
     return h
 
-# ---------------- Parallel segmented downloader ----------------
-DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "4"))  # set 3–6 based on bandwidth
+# Parallel segmented downloader config
+DEFAULT_MAX_WORKERS = int(os.getenv("TB_MAX_WORKERS", "4"))
 MIN_CHUNK = 256 * 1024
-START_CHUNK = 512 * 1024
+START_CHUNK = 512 * 1024  # initial subrequest size; adapts down on errors
 
 async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int,
                        headers_fn, attempt_chunk: int, on_progress, total_size: int,
@@ -76,7 +76,7 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
             if not data:
                 raise httpx.ReadError("empty body")
 
-            # Write at proper position without truncating other segments
+            # Write exactly at desired position (no truncation)
             fhandle.seek(write_offset + (cur_start - start))
             fhandle.write(data)
 
@@ -92,7 +92,7 @@ async def _fetch_range(client: httpx.AsyncClient, url: str, start: int, end: int
             continue
 
         except (httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectError):
-            # Adaptive: shrink chunk and retry
+            # Adaptive: reduce subrequest size and retry
             cur_chunk = max(MIN_CHUNK, cur_chunk // 2)
             await asyncio.sleep(0.5)
             if cur_chunk <= MIN_CHUNK:
@@ -119,11 +119,11 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
     """
     workers = workers or DEFAULT_MAX_WORKERS
 
-    # Pre-allocate file
+    # Pre-allocate the file to full size (sparse)
     with open(path, "wb") as f:
         f.truncate(size)
 
-    # Build balanced segments
+    # Create balanced segments for workers
     base_seg = max(START_CHUNK * 8, size // max(1, workers * 16))
     segments = []
     s = 0
@@ -144,7 +144,6 @@ async def download_parallel(client: httpx.AsyncClient, url: str, size: int, path
 
     await asyncio.gather(*(run_seg(i, rng) for i, rng in enumerate(segments)))
 
-# ---------------- Entry point ----------------
 async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) -> tuple[str, FileMeta]:
     """
     Download to a temp file with CDN-friendly headers and parallel ranged GET.
@@ -153,7 +152,7 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
     url = meta.url
 
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        # Probe with a tiny range GET to learn size/name; avoids HEAD 403 on this CDN
+        # Probe with tiny range GET to learn size/name; avoids HEAD 403 path
         r0 = await client.get(url, headers=_headers_for(url, "bytes=0-0"))
         if r0.status_code not in (200, 206):
             raise RuntimeError(f"CDN refused ranged request: {r0.status_code}")
@@ -188,11 +187,11 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
             else:
                 meta.name = _name_from_url(str(r0.url)) or "file"
 
-        # Prepare output file
+        # Prepare output
         fd, path = tempfile.mkstemp(prefix="tb_", suffix=f"_{meta.name}")
         os.close(fd)
 
-        # If size is unknown, stream single GET
+        # If size unknown, stream single GET as fallback
         if size is None:
             written = 0
             r = await client.get(url, headers=_headers_for(url))
@@ -221,4 +220,3 @@ async def fetch_to_temp(meta: FileMeta, timeout: int = 240, on_progress=None) ->
                 pass
 
         return path, meta
-                
