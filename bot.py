@@ -3,6 +3,9 @@ import logging
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from handlers.leech import get_enhanced_handler
 import asyncio
+from threading import Thread
+import http.server
+import socketserver
 
 # Configure detailed logging
 logging.basicConfig(
@@ -11,6 +14,37 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 🏥 NEW: Health check server for Koyeb
+def start_health_server():
+    """Start health check server so Koyeb knows bot is alive"""
+    PORT = int(os.environ.get('PORT', 8000))
+    
+    class HealthHandler(http.server.SimpleHTTPRequestHandler):
+        def do_GET(self):
+            # Respond to GET health checks
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'Terabox Bot: Healthy and Running!')
+                
+        def do_HEAD(self):
+            # Respond to HEAD health checks (this fixes the 501 errors)
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+                
+        def log_message(self, format, *args):
+            # Suppress HTTP server logs to avoid spam
+            pass
+    
+    try:
+        with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
+            logger.info(f"🏥 Health check server started on port {PORT}")
+            httpd.serve_forever()
+    except Exception as e:
+        logger.error(f"❌ Health server error: {e}")
+
+# Your existing start handler (keeping all your current code)
 async def start_handler(update, context):
     """Handle /start command with detailed logging"""
     logger.info(f"📨 START command received from user {update.effective_user.id}")
@@ -24,7 +58,7 @@ async def start_handler(update, context):
         "Send me a Terabox share link and I'll download it for you!\n\n"
         "⚡ <b>Example:</b>\n"
         "<code>/leech https://teraboxurl.com/s/1abc...</code>\n\n"
-        "via @Terabox_leech_pro_bot"
+        "via @Terabox_leech_Pro_bot"
     )
     
     try:
@@ -37,6 +71,7 @@ async def start_handler(update, context):
     except Exception as e:
         logger.error(f"❌ START response failed: {e}")
 
+# Your existing debug handler (keeping all your current code)
 async def debug_message_handler(update, context):
     """Debug handler to catch all messages"""
     user_id = update.effective_user.id
@@ -49,6 +84,7 @@ async def debug_message_handler(update, context):
     else:
         logger.info(f"📝 Non-leech message: '{message_text}'")
 
+# Your existing error handler (keeping all your current code)
 async def error_handler(update, context):
     """Handle all errors with detailed logging"""
     logger.error(f"❌ ERROR occurred: {context.error}")
@@ -63,8 +99,14 @@ async def error_handler(update, context):
             logger.error(f"❌ Could not send error message: {e}")
 
 def main():
-    """Main function with comprehensive logging"""
-    # Get bot token
+    """Main function with comprehensive logging and health check server"""
+    
+    # 🏥 NEW: Start health check server in background thread
+    logger.info("🏥 Starting health check server...")
+    health_thread = Thread(target=start_health_server, daemon=True)
+    health_thread.start()
+    
+    # Get bot token (your existing code)
     token = os.getenv("BOT_TOKEN")
     if not token:
         logger.error("❌ BOT_TOKEN not found in environment variables")
@@ -72,10 +114,10 @@ def main():
     
     logger.info(f"🔑 Bot token found: {token[:10]}...")
     
-    # Create application
+    # Create application (your existing code)
     application = Application.builder().token(token).build()
     
-    # Add handlers with logging
+    # Add handlers with logging (your existing code)
     logger.info("📝 Adding handlers...")
     
     # Start handler
@@ -95,8 +137,8 @@ def main():
     application.add_error_handler(error_handler)
     logger.info("✅ ERROR handler added")
     
-    # Start the bot
-    logger.info("🚀 Starting Terabox Leech Pro Bot with debug logging...")
+    # Start the bot (your existing code)
+    logger.info("🚀 Starting Terabox Leech Pro Bot with debug logging and health checks...")
     
     try:
         application.run_polling(drop_pending_updates=True)
@@ -105,4 +147,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+        
