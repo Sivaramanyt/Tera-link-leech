@@ -22,7 +22,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# The API that works
+# The API endpoint
 WDZONE_API = "https://wdzone-terabox-api.vercel.app/api"
 
 class TeraboxResolver:
@@ -39,7 +39,7 @@ class TeraboxResolver:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                     "Accept": "application/json, text/plain, */*",
                     "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",  # Accept compressed response
+                    "Accept-Encoding": "gzip, deflate, br",
                     "DNT": "1",
                     "Connection": "keep-alive",
                     "Referer": "https://www.terabox.com/",
@@ -92,7 +92,6 @@ class TeraboxResolver:
             size_str = size_str.strip().upper()
             
             # Extract number and unit
-            import re
             match = re.match(r'([0-9.]+)\s*([KMGT]?B)', size_str)
             if not match:
                 return None
@@ -116,31 +115,27 @@ class TeraboxResolver:
             return None
     
     def _decode_response_content(self, response):
-        """Safely decode response content handling different encodings including Brotli"""
+        """Safely decode response content handling Brotli, Gzip, and plain text"""
         try:
-            # Check content encoding
             content_encoding = response.headers.get('content-encoding', '').lower()
             logger.info(f"📦 Content-Encoding: {content_encoding}")
-            logger.info(f"📦 Content-Type: {response.headers.get('content-type', 'unknown')}")
             
             raw_content = response.content
             logger.info(f"📦 Raw content length: {len(raw_content)} bytes")
-            logger.info(f"📦 First 20 bytes: {raw_content[:20]}")
             
-            # Handle Brotli compression (this is what we need!)
+            # Handle Brotli compression (BR)
             if content_encoding == 'br':
                 logger.info(f"🗜️ Decompressing Brotli content...")
                 if HAS_BROTLI:
                     try:
                         decompressed = brotli.decompress(raw_content)
-                        logger.info(f"✅ Brotli decompressed: {len(decompressed)} bytes")
                         decoded = decompressed.decode('utf-8')
-                        logger.info(f"✅ Brotli->UTF-8 decoded: {len(decoded)} chars")
+                        logger.info(f"✅ Brotli decompressed and decoded: {len(decoded)} chars")
                         return decoded
                     except Exception as e:
                         logger.error(f"❌ Brotli decompression failed: {e}")
                 else:
-                    logger.error(f"❌ Brotli compression detected but brotli package not installed!")
+                    logger.error(f"❌ Brotli compression detected but brotli package not available!")
                     return None
             
             # Handle Gzip compression
@@ -148,38 +143,32 @@ class TeraboxResolver:
                 logger.info(f"🗜️ Decompressing gzip content...")
                 try:
                     decompressed = gzip.decompress(raw_content)
-                    logger.info(f"✅ Gzip decompressed: {len(decompressed)} bytes")
-                    return decompressed.decode('utf-8')
+                    decoded = decompressed.decode('utf-8')
+                    logger.info(f"✅ Gzip decompressed and decoded: {len(decoded)} chars")
+                    return decoded
                 except Exception as e:
-                    logger.warning(f"⚠️ Gzip decompression failed: {e}")
+                    logger.error(f"❌ Gzip decompression failed: {e}")
             
-            # Try direct text decoding with different encodings
+            # Try direct decoding with different encodings
             for encoding in ['utf-8', 'latin-1', 'ascii']:
                 try:
                     decoded = raw_content.decode(encoding)
-                    logger.info(f"✅ Decoded with {encoding}: {len(decoded)} chars")
-                    # Only return if it looks like valid JSON
-                    if decoded.strip().startswith('{'):
+                    # Validate that it looks like JSON
+                    if decoded.strip().startswith('{') and decoded.strip().endswith('}'):
+                        logger.info(f"✅ Direct decode with {encoding}: {len(decoded)} chars")
                         return decoded
-                    else:
-                        logger.warning(f"⚠️ {encoding} decoded but doesn't look like JSON")
-                        continue
-                except UnicodeDecodeError as e:
-                    logger.warning(f"⚠️ {encoding} decoding failed: {e}")
+                except UnicodeDecodeError:
                     continue
             
-            # Try using httpx's built-in text property as last resort
+            # Use httpx's text property as fallback
             try:
                 text = response.text
-                logger.info(f"✅ Using response.text: {len(text)} chars")
-                if text.strip().startswith('{'):
+                if text.strip().startswith('{') and text.strip().endswith('}'):
+                    logger.info(f"✅ Using response.text: {len(text)} chars")
                     return text
-                else:
-                    logger.warning(f"⚠️ response.text doesn't look like JSON")
-            except Exception as e:
-                logger.warning(f"⚠️ response.text failed: {e}")
+            except Exception:
+                pass
             
-            # Last resort failed
             logger.error(f"❌ All decoding methods failed")
             return None
             
@@ -188,14 +177,14 @@ class TeraboxResolver:
             return None
     
     async def _wdzone_api_method(self, url: str):
-        """Use wdzone API with proper Brotli response handling"""
+        """Call wdzone API with proper response handling"""
         try:
             client = await self.get_client()
             
             clean_url = url.strip()
             logger.info(f"🌐 Calling wdzone API with: {clean_url}")
             
-            # Call wdzone API
+            # Make API request
             response = await client.get(
                 WDZONE_API,
                 params={"url": clean_url},
@@ -203,20 +192,18 @@ class TeraboxResolver:
             )
             
             logger.info(f"📡 API Response Status: {response.status_code}")
-            logger.info(f"📡 Response Headers: {dict(response.headers)}")
             
             if response.status_code != 200:
                 logger.error(f"❌ API returned {response.status_code}")
                 return None, None, None
             
-            # Decode the response content properly (including Brotli!)
+            # Decode response content
             text_content = self._decode_response_content(response)
             if not text_content:
                 logger.error(f"❌ Could not decode response content")
                 return None, None, None
             
-            logger.info(f"📄 Decoded content length: {len(text_content)} chars")
-            logger.info(f"📄 First 200 chars: {text_content[:200]}")
+            logger.info(f"📄 Decoded content preview: {text_content[:200]}...")
             
             # Parse JSON
             try:
@@ -224,7 +211,6 @@ class TeraboxResolver:
                 logger.info(f"📋 JSON parsed successfully, keys: {list(data.keys())}")
             except json.JSONDecodeError as e:
                 logger.error(f"❌ JSON parsing failed: {e}")
-                logger.error(f"❌ Content that failed to parse: {text_content[:500]}")
                 return None, None, None
             
             # Check API status
@@ -235,17 +221,17 @@ class TeraboxResolver:
                 logger.error(f"❌ API Status not Success: {status}")
                 return None, None, None
             
-            # Extract file info - FIXED PARSING LOGIC
+            # Extract file info
             extracted_info = data.get("📜 Extracted Info")
-            logger.info(f"📝 Extracted Info Type: {type(extracted_info)}")
+            logger.info(f"📝 Extracted Info type: {type(extracted_info)}")
             
             if not extracted_info:
                 logger.error(f"❌ No extracted info in response")
                 return None, None, None
             
-            # Handle the actual format from your screenshot
+            # Handle different response formats
             if isinstance(extracted_info, list) and len(extracted_info) > 0:
-                file_info = extracted_info[0]  # Get first file
+                file_info = extracted_info[0]
                 logger.info(f"📁 Processing file from list, keys: {list(file_info.keys())}")
             elif isinstance(extracted_info, dict):
                 file_info = extracted_info
@@ -254,26 +240,23 @@ class TeraboxResolver:
                 logger.error(f"❌ Unexpected extracted_info format: {type(extracted_info)}")
                 return None, None, None
             
-            # Extract data using the EXACT keys from your screenshot
+            # Extract the actual data using exact keys from API response
             download_url = file_info.get("🔽 Direct Download Link")
             filename = file_info.get("📂 Title")
-            file_size_str = file_info.get("📏 Size") or file_info.get("size")  # Try both possible keys
+            file_size_str = file_info.get("📏 Size") or file_info.get("size")
             
-            logger.info(f"📄 Raw extracted - URL exists: {download_url is not None}")
-            logger.info(f"📄 Raw extracted - Name: {filename}")
-            logger.info(f"📄 Raw extracted - Size string: {file_size_str}")
+            logger.info(f"📄 Extracted - URL exists: {download_url is not None}")
+            logger.info(f"📄 Extracted - Name: {filename}")
+            logger.info(f"📄 Extracted - Size string: {file_size_str}")
             
-            # Parse size from string to bytes
+            # Parse size to bytes
             filesize_bytes = self._parse_size_string(file_size_str)
             
-            logger.info(f"📄 Final - URL: {download_url is not None}")
-            logger.info(f"📄 Final - Name: {filename}")  
-            logger.info(f"📄 Final - Size bytes: {filesize_bytes}")
-            
             if download_url and filename:
+                logger.info(f"✅ All required fields found")
                 return download_url, filename, filesize_bytes
             else:
-                logger.error(f"❌ Missing required fields - URL: {download_url is not None}, Name: {filename is not None}")
+                logger.error(f"❌ Missing required fields")
                 return None, None, None
                 
         except Exception as e:
