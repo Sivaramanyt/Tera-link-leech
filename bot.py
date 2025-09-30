@@ -11,22 +11,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 async def start_handler(update, context):
-    """Handle /start command"""
+    """Handle /start command - FIXED"""
     welcome_msg = (
-        "🚀 **Terabox Leech Pro Bot**\n\n"
-        "📋 **Commands:**\n"
-        "• `/start` - Show this help\n"
-        "• `/leech <terabox_link>` - Download and send file\n\n"
-        "📝 **Usage:**\n"
+        "🚀 <b>Terabox Leech Pro Bot</b>\n\n"
+        "📋 <b>Commands:</b>\n"
+        "• /start - Show this help\n"
+        "• /leech &lt;terabox_link&gt; - Download and send file\n\n"
+        "📝 <b>Usage:</b>\n"
         "Send me a Terabox share link and I'll download it for you!\n\n"
-        "⚡ **Example:**\n"
-        "`/leech https://teraboxurl.com/s/1abc...`\n\n"
+        "⚡ <b>Example:</b>\n"
+        "<code>/leech https://teraboxurl.com/s/1abc...</code>\n\n"
         "via @Terabox_leech_pro_bot"
     )
     
     await update.message.reply_text(
         welcome_msg,
-        parse_mode='Markdown',
+        parse_mode='HTML',  # Changed from Markdown to HTML
         disable_web_page_preview=True
     )
 
