@@ -7,6 +7,8 @@ import httpx
 import random
 import time
 import logging
+import gzip
+import io
 from urllib.parse import urlparse, parse_qs
 from services.downloader import FileMeta
 
@@ -29,7 +31,7 @@ class TeraboxResolver:
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
                     "Accept": "application/json, text/plain, */*",
                     "Accept-Language": "en-US,en;q=0.9",
-                    "Accept-Encoding": "gzip, deflate, br",
+                    "Accept-Encoding": "gzip, deflate, br",  # Accept compressed response
                     "DNT": "1",
                     "Connection": "keep-alive",
                     "Referer": "https://www.terabox.com/",
@@ -105,8 +107,56 @@ class TeraboxResolver:
             logger.warning(f"⚠️ Size parsing error: {e}")
             return None
     
+    def _decode_response_content(self, response):
+        """Safely decode response content handling different encodings"""
+        try:
+            # Check if response is compressed
+            content_encoding = response.headers.get('content-encoding', '').lower()
+            logger.info(f"📦 Content-Encoding: {content_encoding}")
+            logger.info(f"📦 Content-Type: {response.headers.get('content-type', 'unknown')}")
+            
+            raw_content = response.content
+            logger.info(f"📦 Raw content length: {len(raw_content)} bytes")
+            logger.info(f"📦 First 20 bytes: {raw_content[:20]}")
+            
+            # Try different decompression methods
+            if content_encoding == 'gzip' or raw_content.startswith(b'\x1f\x8b'):
+                logger.info(f"🗜️ Decompressing gzip content...")
+                try:
+                    decompressed = gzip.decompress(raw_content)
+                    logger.info(f"✅ Gzip decompressed: {len(decompressed)} bytes")
+                    return decompressed.decode('utf-8')
+                except Exception as e:
+                    logger.warning(f"⚠️ Gzip decompression failed: {e}")
+            
+            # Try direct text decoding with different encodings
+            for encoding in ['utf-8', 'latin-1', 'ascii']:
+                try:
+                    decoded = raw_content.decode(encoding)
+                    logger.info(f"✅ Decoded with {encoding}: {len(decoded)} chars")
+                    return decoded
+                except UnicodeDecodeError as e:
+                    logger.warning(f"⚠️ {encoding} decoding failed: {e}")
+                    continue
+            
+            # Try using httpx's built-in text property
+            try:
+                text = response.text
+                logger.info(f"✅ Using response.text: {len(text)} chars")
+                return text
+            except Exception as e:
+                logger.warning(f"⚠️ response.text failed: {e}")
+            
+            # Last resort: try to interpret as binary data
+            logger.error(f"❌ All decoding methods failed")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Content decoding error: {e}")
+            return None
+    
     async def _wdzone_api_method(self, url: str):
-        """Use wdzone API with correct parsing for the actual response format"""
+        """Use wdzone API with proper response handling"""
         try:
             client = await self.get_client()
             
@@ -121,16 +171,28 @@ class TeraboxResolver:
             )
             
             logger.info(f"📡 API Response Status: {response.status_code}")
+            logger.info(f"📡 Response Headers: {dict(response.headers)}")
             
             if response.status_code != 200:
                 logger.error(f"❌ API returned {response.status_code}")
                 return None, None, None
             
+            # Decode the response content properly
+            text_content = self._decode_response_content(response)
+            if not text_content:
+                logger.error(f"❌ Could not decode response content")
+                return None, None, None
+            
+            logger.info(f"📄 Decoded content length: {len(text_content)} chars")
+            logger.info(f"📄 First 200 chars: {text_content[:200]}")
+            
+            # Parse JSON
             try:
-                data = response.json()
-                logger.info(f"📋 API Response Keys: {list(data.keys())}")
-            except json.JSONDecodeError:
-                logger.error(f"❌ Invalid JSON response")
+                data = json.loads(text_content)
+                logger.info(f"📋 JSON parsed successfully, keys: {list(data.keys())}")
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ JSON parsing failed: {e}")
+                logger.error(f"❌ Content that failed to parse: {text_content[:500]}")
                 return None, None, None
             
             # Check API status
@@ -202,4 +264,4 @@ async def cleanup_resolver():
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
-                
+                    
