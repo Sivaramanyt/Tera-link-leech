@@ -73,8 +73,40 @@ class TeraboxResolver:
                 else:
                     raise RuntimeError(f"Resolver error: {str(e)}")
     
+    def _parse_size_string(self, size_str):
+        """Parse size strings like '6.34 MB' into bytes"""
+        if not size_str or not isinstance(size_str, str):
+            return None
+        
+        try:
+            size_str = size_str.strip().upper()
+            
+            # Extract number and unit
+            import re
+            match = re.match(r'([0-9.]+)\s*([KMGT]?B)', size_str)
+            if not match:
+                return None
+            
+            number = float(match.group(1))
+            unit = match.group(2)
+            
+            # Convert to bytes
+            multipliers = {
+                'B': 1,
+                'KB': 1024,
+                'MB': 1024**2,
+                'GB': 1024**3,
+                'TB': 1024**4
+            }
+            
+            return int(number * multipliers.get(unit, 1))
+            
+        except Exception as e:
+            logger.warning(f"⚠️ Size parsing error: {e}")
+            return None
+    
     async def _wdzone_api_method(self, url: str):
-        """Use wdzone API with detailed logging"""
+        """Use wdzone API with correct parsing for the actual response format"""
         try:
             client = await self.get_client()
             
@@ -96,7 +128,7 @@ class TeraboxResolver:
             
             try:
                 data = response.json()
-                logger.info(f"📋 Full API Response: {json.dumps(data, indent=2)}")
+                logger.info(f"📋 API Response Keys: {list(data.keys())}")
             except json.JSONDecodeError:
                 logger.error(f"❌ Invalid JSON response")
                 return None, None, None
@@ -109,61 +141,51 @@ class TeraboxResolver:
                 logger.error(f"❌ API Status not Success: {status}")
                 return None, None, None
             
-            # Extract file info
+            # Extract file info - FIXED PARSING LOGIC
             extracted_info = data.get("📜 Extracted Info")
-            logger.info(f"📝 Extracted Info: {extracted_info}")
+            logger.info(f"📝 Extracted Info Type: {type(extracted_info)}")
             
-            if not extracted_info or extracted_info is None:
-                logger.error(f"❌ No extracted info - Link is likely expired/invalid")
-                logger.error(f"❌ This means the Terabox link has expired or is not accessible")
+            if not extracted_info:
+                logger.error(f"❌ No extracted info in response")
                 return None, None, None
             
-            # Handle different response formats
-            if isinstance(extracted_info, list) and extracted_info:
-                file_info = extracted_info[0]
-                logger.info(f"📁 Processing first file from list")
+            # Handle the actual format from your screenshot
+            if isinstance(extracted_info, list) and len(extracted_info) > 0:
+                file_info = extracted_info[0]  # Get first file
+                logger.info(f"📁 Processing file from list, keys: {list(file_info.keys())}")
             elif isinstance(extracted_info, dict):
                 file_info = extracted_info
-                logger.info(f"📁 Processing single file dict")
+                logger.info(f"📁 Processing dict file, keys: {list(file_info.keys())}")
             else:
                 logger.error(f"❌ Unexpected extracted_info format: {type(extracted_info)}")
                 return None, None, None
             
-            logger.info(f"📁 File info keys: {list(file_info.keys())}")
+            # Extract data using the EXACT keys from your screenshot
+            download_url = file_info.get("🔽 Direct Download Link")
+            filename = file_info.get("📂 Title")
+            file_size_str = file_info.get("📏 Size") or file_info.get("size")  # Try both possible keys
             
-            # Extract download data
-            download_url = (
-                file_info.get("🔽 Direct Download Link") or
-                file_info.get("download_url") or
-                file_info.get("downloadUrl") or 
-                file_info.get("url") or
-                file_info.get("dlink")
-            )
+            logger.info(f"📄 Raw extracted - URL exists: {download_url is not None}")
+            logger.info(f"📄 Raw extracted - Name: {filename}")
+            logger.info(f"📄 Raw extracted - Size string: {file_size_str}")
             
-            filename = (
-                file_info.get("📂 Title") or
-                file_info.get("title") or
-                file_info.get("name") or
-                file_info.get("filename") or
-                "terabox_file"
-            )
+            # Parse size from string to bytes
+            filesize_bytes = self._parse_size_string(file_size_str)
             
-            filesize = (
-                file_info.get("size") or
-                file_info.get("filesize") or
-                file_info.get("file_size")
-            )
+            logger.info(f"📄 Final - URL: {download_url is not None}")
+            logger.info(f"📄 Final - Name: {filename}")  
+            logger.info(f"📄 Final - Size bytes: {filesize_bytes}")
             
-            logger.info(f"📄 Extracted - URL: {download_url is not None}, Name: {filename}, Size: {filesize}")
-            
-            if download_url:
-                return download_url, filename, filesize
+            if download_url and filename:
+                return download_url, filename, filesize_bytes
             else:
-                logger.error(f"❌ No download URL found in file info")
+                logger.error(f"❌ Missing required fields - URL: {download_url is not None}, Name: {filename is not None}")
                 return None, None, None
                 
         except Exception as e:
             logger.error(f"❌ wdzone API exception: {e}")
+            import traceback
+            logger.error(f"❌ Full traceback: {traceback.format_exc()}")
             return None, None, None
 
 # Global resolver instance
@@ -180,4 +202,4 @@ async def cleanup_resolver():
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
-                    
+                
