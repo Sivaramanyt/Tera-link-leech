@@ -6,23 +6,23 @@ import re
 import httpx
 import random
 import time
-from urllib.parse import urlparse, parse_qs
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
+from urllib.parse import urlparse, parse_qs, unquote
+from tenacity import retry, stop_after_attempt, wait_fixed
 from services.downloader import FileMeta
 
-# Optional external helper (safe if absent)
-try:
-    from terabox_linker import get_direct_link # type: ignore
-except Exception:
-    get_direct_link = None
+# Multiple API endpoints for better reliability
+API_ENDPOINTS = [
+    "https://wdzone-terabox-api.vercel.app/api",
+    "https://terabox-dl.qtcloud.workers.dev/api/get-info",  # Alternative API
+    "https://terabox-downloader.vercel.app/api/download"     # Another alternative
+]
 
-# Public API that returns direct links from Terabox shares
-API_ENDPOINT = "https://wdzone-terabox-api.vercel.app/api"
+# Enhanced regex patterns
+_PAGE_DATA_RE = re.compile(r"window\.pageData\s*=\s*(\{.*?\});", re.DOTALL | re.MULTILINE)
+_YUNDATA_RE = re.compile(r"window\.yunData\s*=\s*(\{.*?\});", re.DOTALL | re.MULTILINE)
+_SETDATA_RE = re.compile(r"locals\.mset\((\{.*?\})\)", re.DOTALL)
 
-# Regex to capture embedded JSON on official terabox share pages
-_PAGE_DATA_RE = re.compile(r"window\.pageData\s*=\s*(\{.*?\});", re.DOTALL)
-
-# Enhanced headers with better browser emulation
+# Enhanced headers
 HTML_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -35,93 +35,94 @@ HTML_HEADERS = {
     "Sec-Fetch-Mode": "navigate",
     "Sec-Fetch-Site": "none",
     "Cache-Control": "max-age=0",
-    "Referer": "https://www.terabox.com/",
 }
 
 API_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
     "Content-Type": "application/json;charset=UTF-8",
     "Referer": "https://www.terabox.com/",
-    "Origin": "https://www.terabox.com",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "cross-site",
 }
 
 class TeraboxResolver:
     def __init__(self):
         self._client = None
-        self._lock = asyncio.Lock()  # Prevent concurrent API calls
+        self._lock = asyncio.Lock()
     
     async def get_client(self):
-        """Get or create HTTP client"""
         if self._client is None:
             self._client = httpx.AsyncClient(
                 timeout=30,
                 follow_redirects=True,
-                headers=API_HEADERS,
+                headers=HTML_HEADERS,
                 limits=httpx.Limits(max_keepalive_connections=5, max_connections=10)
             )
         return self._client
     
     async def close(self):
-        """Close HTTP client"""
         if self._client:
             await self._client.aclose()
             self._client = None
     
     async def resolve(self, share_url: str) -> FileMeta:
-        """Main resolve method with proper error handling"""
-        async with self._lock:  # Prevent concurrent access
+        async with self._lock:
             try:
-                # Add small delay to avoid overwhelming APIs
                 await asyncio.sleep(random.uniform(0.5, 1.0))
                 
-                # Try methods sequentially, not concurrently
-                url, name, size = await self._via_public_api(share_url)
+                print(f"[resolver] Attempting to resolve: {share_url}")
+                
+                # Method 1: Try multiple public APIs
+                for api_url in API_ENDPOINTS:
+                    try:
+                        url, name, size = await self._try_api(api_url, share_url)
+                        if url:
+                            print(f"[resolver] Success via API: {api_url}")
+                            return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
+                    except Exception as e:
+                        print(f"[resolver] API {api_url} failed: {e}")
+                        continue
+                
+                # Method 2: Enhanced site scraping
+                url, name, size = await self._enhanced_site_scraping(share_url)
                 if url:
+                    print(f"[resolver] Success via site scraping")
                     return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
                 
-                # Fallback to library method
-                if get_direct_link:
-                    url, name, size = await self._with_lib(share_url)
-                    if url:
-                        return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
-                
-                # Fallback to site flows
-                url, name, size = await self._site_flows(share_url)
+                # Method 3: Try different link formats
+                url, name, size = await self._try_link_variations(share_url)
                 if url:
+                    print(f"[resolver] Success via link variations")
                     return FileMeta(name=name or "file", size=(int(size) if size else None), url=url)
                 
-                raise RuntimeError("Unable to resolve direct link from all methods")
+                raise RuntimeError("Link may be expired, private, or in unsupported format")
                 
             except Exception as e:
-                await self.close()  # Clean up on error
-                raise RuntimeError(f"Resolver error: {str(e)}")
+                await self.close()
+                raise RuntimeError(f"Unable to resolve direct link from all methods: {str(e)}")
     
-    async def _via_public_api(self, share_url: str):
-        """Public API method with proper retry logic"""
+    async def _try_api(self, api_url: str, share_url: str):
         try:
             client = await self.get_client()
             
-            # Single API call with proper timeout
-            response = await client.get(
-                API_ENDPOINT, 
-                params={"url": share_url},
-                timeout=15
-            )
+            # Different APIs have different parameter formats
+            params = {"url": share_url}
+            if "qtcloud" in api_url:
+                params = {"url": share_url, "type": "download"}
+            elif "vercel" in api_url and "download" in api_url:
+                params = {"link": share_url}
+            
+            response = await client.get(api_url, params=params, headers=API_HEADERS, timeout=15)
             
             if response.status_code != 200:
                 return None, None, None
             
-            js = response.json()
+            try:
+                js = response.json()
+            except json.JSONDecodeError:
+                return None, None, None
             
             # Handle different API response formats
+            # Format 1: wdzone-terabox-api
             items = js.get("📜 Extracted Info") or js.get("data") or []
             if isinstance(items, list) and items:
                 item = items[0]
@@ -131,147 +132,155 @@ class TeraboxResolver:
                 if dlink:
                     return dlink, name, size
             
-            # Flat format fallback
-            direct = js.get("direct") or js.get("download") or js.get("url")
-            if direct:
-                return direct, js.get("name") or js.get("filename"), js.get("size")
-                
+            # Format 2: Standard format
+            dlink = js.get("direct") or js.get("download") or js.get("url") or js.get("downloadUrl")
+            if dlink:
+                name = js.get("name") or js.get("filename") or js.get("title")
+                size = js.get("size") or js.get("fileSize")
+                return dlink, name, size
+            
+            # Format 3: Nested data
+            if "data" in js and isinstance(js["data"], dict):
+                data = js["data"]
+                dlink = data.get("url") or data.get("downloadUrl") or data.get("direct")
+                if dlink:
+                    name = data.get("name") or data.get("filename")
+                    size = data.get("size")
+                    return dlink, name, size
+            
             return None, None, None
             
         except Exception as e:
-            print(f"Public API error: {e}")
+            print(f"[resolver] API error for {api_url}: {e}")
             return None, None, None
     
-    async def _with_lib(self, share_url: str):
-        """Library method wrapper"""
-        if not get_direct_link:
-            return None, None, None
-        
-        try:
-            loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, get_direct_link, share_url)
-            return data.get("url"), data.get("name"), data.get("size")
-        except Exception as e:
-            print(f"Library method error: {e}")
-            return None, None, None
-    
-    async def _site_flows(self, share_url: str):
-        """Site scraping method with proper error handling"""
+    async def _enhanced_site_scraping(self, share_url: str):
         try:
             client = await self.get_client()
             
-            # Load the page
-            response = await client.get(share_url, headers=HTML_HEADERS, timeout=15)
+            # Handle different URL formats
+            normalized_url = share_url.replace("teraboxurl.com", "www.terabox.com")
+            normalized_url = normalized_url.replace("1024tera.com", "www.terabox.com") 
+            
+            response = await client.get(normalized_url, headers=HTML_HEADERS, timeout=15)
             response.raise_for_status()
             
-            final_url = str(response.url)
             html = response.text
-            host = urlparse(final_url).netloc.lower()
-            q = parse_qs(urlparse(final_url).query)
-            surl = (q.get("surl") or q.get("shorturl") or [None])[0]
-            pwd = (q.get("pwd") or q.get("password") or [None])[0]
+            final_url = str(response.url)
             
-            # Try to extract from page data
-            match = _PAGE_DATA_RE.search(html)
-            if match:
-                try:
-                    data = json.loads(match.group(1))
-                    files = (
-                        data.get("shareInfo", {}).get("file_list")
-                        or data.get("file_list")
-                        or data.get("list")
-                        or []
-                    )
-                    
-                    if isinstance(files, list) and files:
-                        file_info = files[0]
-                        dlink = file_info.get("dlink")
-                        name = file_info.get("server_filename") or file_info.get("filename")
-                        size = file_info.get("size")
-                        
-                        if dlink:
-                            return dlink.encode("utf-8").decode("unicode_escape"), name, size
-                            
-                except json.JSONDecodeError as e:
-                    print(f"JSON parsing error: {e}")
-                    pass
+            # Try multiple regex patterns
+            for pattern in [_PAGE_DATA_RE, _YUNDATA_RE, _SETDATA_RE]:
+                match = pattern.search(html)
+                if match:
+                    try:
+                        data = json.loads(match.group(1))
+                        result = self._extract_from_data(data)
+                        if result[0]:  # If URL found
+                            return result
+                    except json.JSONDecodeError:
+                        continue
             
-            # Try 1024tera API if applicable
-            if any(k in host for k in ["1024tera", "1024terabox"]) and surl:
-                return await self._try_1024tera_api(client, surl, pwd)
-            
-            return None, None, None
+            # Try direct extraction from HTML
+            return await self._extract_from_html(html, final_url)
             
         except Exception as e:
-            print(f"Site flows error: {e}")
+            print(f"[resolver] Site scraping error: {e}")
             return None, None, None
     
-    async def _try_1024tera_api(self, client, surl, pwd):
-        """1024tera API method"""
+    def _extract_from_data(self, data):
+        """Extract file info from JSON data"""
         try:
-            list_url = f"https://www.1024tera.com/share/list?surl={surl}&page=1&pageSize=50"
-            if pwd:
-                list_url += f"&pwd={pwd}"
+            # Try different data structures
+            files = (
+                data.get("shareInfo", {}).get("file_list") or
+                data.get("file_list") or
+                data.get("list") or
+                data.get("files") or
+                []
+            )
             
-            response = await client.get(list_url, headers=API_HEADERS, timeout=15)
-            response.raise_for_status()
-            
-            payload = response.json()
-            items = payload.get("list") or payload.get("data") or payload.get("files") or []
-            
-            if isinstance(items, list) and items:
-                item = items[0]
-                name = item.get("server_filename") or item.get("filename")
-                size = item.get("size")
+            if isinstance(files, list) and files:
+                file_info = files[0]
+                dlink = file_info.get("dlink")
+                name = file_info.get("server_filename") or file_info.get("filename")
+                size = file_info.get("size")
                 
-                # Check for existing dlink
-                dlink = item.get("dlink") or item.get("url")
                 if dlink:
+                    # Decode any escaped characters
+                    try:
+                        dlink = dlink.encode("utf-8").decode("unicode_escape")
+                    except:
+                        pass
                     return dlink, name, size
-                
-                # Request transfer
-                fs_id = item.get("fs_id") or item.get("fsid") or item.get("id")
-                if fs_id:
-                    body = {"surl": surl, "fs_id": fs_id}
-                    if pwd:
-                        body["pwd"] = pwd
-                    
-                    transfer_response = await client.post(
-                        "https://www.1024tera.com/share/transfer",
-                        headers=API_HEADERS,
-                        json=body,
-                        timeout=15
-                    )
-                    
-                    if transfer_response.status_code == 200:
-                        transfer_data = transfer_response.json()
-                        dlink = (
-                            transfer_data.get("dlink")
-                            or transfer_data.get("url")
-                            or transfer_data.get("data", {}).get("dlink")
-                        )
-                        if dlink:
-                            return dlink, name, size
             
             return None, None, None
             
         except Exception as e:
-            print(f"1024tera API error: {e}")
+            print(f"[resolver] Data extraction error: {e}")
+            return None, None, None
+    
+    async def _extract_from_html(self, html: str, url: str):
+        """Extract download info directly from HTML"""
+        try:
+            # Look for direct download links in HTML
+            patterns = [
+                r'"dlink":"([^"]+)"',
+                r'"url":"(https://[^"]*\.terabox\.com[^"]*)"',
+                r'"downloadUrl":"([^"]+)"',
+                r'data-url="([^"]+)"',
+            ]
+            
+            for pattern in patterns:
+                match = re.search(pattern, html)
+                if match:
+                    dlink = match.group(1)
+                    # Basic URL validation
+                    if "terabox" in dlink or "teracdn" in dlink:
+                        return dlink, "file", None
+            
+            return None, None, None
+            
+        except Exception as e:
+            print(f"[resolver] HTML extraction error: {e}")
+            return None, None, None
+    
+    async def _try_link_variations(self, share_url: str):
+        """Try different variations of the link"""
+        try:
+            variations = [
+                share_url.replace("teraboxurl.com", "www.terabox.com"),
+                share_url.replace("1024tera.com", "www.terabox.com"),
+                share_url.replace("dm.terabox.com", "www.terabox.com"),
+                share_url.replace("/s/", "/sharing/link?surl=")
+            ]
+            
+            for variation in variations:
+                if variation != share_url:  # Don't retry the same URL
+                    try:
+                        result = await self._enhanced_site_scraping(variation)
+                        if result[0]:
+                            return result
+                    except:
+                        continue
+            
+            return None, None, None
+            
+        except Exception as e:
+            print(f"[resolver] Link variations error: {e}")
             return None, None, None
 
 # Global resolver instance
 _resolver_instance = None
 
 async def get_resolver():
-    """Get global resolver instance"""
     global _resolver_instance
     if _resolver_instance is None:
         _resolver_instance = TeraboxResolver()
     return _resolver_instance
 
 async def cleanup_resolver():
-    """Cleanup global resolver"""
     global _resolver_instance
     if _resolver_instance:
         await _resolver_instance.close()
         _resolver_instance = None
+                        
