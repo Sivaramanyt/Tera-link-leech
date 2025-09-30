@@ -6,17 +6,57 @@ import asyncio
 import tempfile
 import subprocess
 import logging
+import gc
+import psutil
 from mimetypes import guess_type
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
+from telegram.error import NetworkError, TimedOut, RetryAfter
 from services.terabox import get_resolver, cleanup_resolver
 from services.downloader import fetch_to_temp
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
-# ---------- Formatting ----------
+# ---------- Memory Management ----------
+class MemoryManager:
+    """Memory management utilities for free tier hosting"""
+    
+    @staticmethod
+    async def get_memory_info() -> dict:
+        """Get current memory usage information"""
+        try:
+            memory = psutil.virtual_memory()
+            return {
+                'total': memory.total / (1024 * 1024),
+                'available': memory.available / (1024 * 1024),
+                'used': memory.used / (1024 * 1024),
+                'percent': memory.percent
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get memory info: {e}")
+            return {'available': 200}  # Default safe value
+    
+    @staticmethod
+    async def cleanup_memory():
+        """Force garbage collection and memory cleanup"""
+        try:
+            gc.collect()
+            await asyncio.sleep(0.1)  # Brief pause for cleanup
+            logger.debug("🧠 Memory cleanup performed")
+        except Exception as e:
+            logger.warning(f"Memory cleanup failed: {e}")
+    
+    @staticmethod
+    def check_memory_threshold(required_mb: float = 150) -> bool:
+        """Check if we have enough memory for operation"""
+        try:
+            available = psutil.virtual_memory().available / (1024 * 1024)
+            return available >= required_mb
+        except:
+            return True  # Default to allowing operation
 
+# ---------- Formatting (Enhanced with Memory Info) ----------
 def _fmt_size(n: int | None) -> str:
     if n is None:
         return "unknown"
@@ -43,7 +83,6 @@ def _fmt_eta(sec: float) -> str:
     return f"{s}s"
 
 # ---------- Caption/footer ----------
-
 BOT_FOOTER = "via @Terabox_leech_pro_bot"
 
 def _with_footer(text: str) -> str:
@@ -54,7 +93,6 @@ def _with_footer(text: str) -> str:
     return f"{text}\n{BOT_FOOTER}"
 
 # ---------- ffmpeg helpers (optional) ----------
-
 def _probe_duration_seconds(path: str) -> int | None:
     try:
         out = subprocess.check_output(
@@ -79,87 +117,188 @@ def _make_video_thumb(path: str) -> str | None:
     except Exception:
         return None
 
-# ---------- Media sender ----------
-
-async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: str, filename: str):
-    logger.info(f"📤 Sending media: {filename} to chat {chat_id}")
+# ---------- Enhanced Media Sender with Memory Management ----------
+async def _send_media_optimized(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: str, filename: str):
+    """Enhanced media sender with memory optimization for free tier hosting"""
+    logger.info(f"📤 Starting optimized media upload: {filename} to chat {chat_id}")
     
+    # Get file information
+    file_size = os.path.getsize(path)
     mime, _ = guess_type(filename)
     ext = (os.path.splitext(filename)[1] or "").lower()
-    caption = _with_footer(f"📄 Name: {filename}")
+    caption = _with_footer(f"📄 Name: {filename}\n📏 Size: {_fmt_size(file_size)}")
+    
+    # Memory check before upload
+    memory_info = await MemoryManager.get_memory_info()
+    available_mb = memory_info.get('available', 0)
+    logger.info(f"🧠 Pre-upload memory: {available_mb:.1f}MB available, file size: {_fmt_size(file_size)}")
+    
+    # Force memory cleanup
+    await MemoryManager.cleanup_memory()
+    
+    # Determine upload strategy based on file size and available memory
+    large_file_threshold = 50 * 1024 * 1024  # 50MB
+    memory_threshold = 150  # MB
+    
+    upload_as_document = (
+        file_size > large_file_threshold or 
+        available_mb < memory_threshold or
+        not MemoryManager.check_memory_threshold()
+    )
+    
+    # Enhanced timeout calculation
+    timeout_seconds = min(300, max(60, file_size // (1024 * 1024) * 10))
     
     duration = None
     thumb = None
     
     try:
-        if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime.startswith("video/")):
-            duration = _probe_duration_seconds(path)
-            thumb = _make_video_thumb(path)
-            logger.info(f"🎬 Video detected - Duration: {duration}s, Thumb: {thumb is not None}")
+        # Only generate thumbnails for smaller files to save memory
+        if not upload_as_document and file_size < large_file_threshold:
+            if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime.startswith("video/")):
+                try:
+                    duration = _probe_duration_seconds(path)
+                    thumb = _make_video_thumb(path)
+                    logger.info(f"🎬 Video metadata - Duration: {duration}s, Thumb: {thumb is not None}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Media probe error (continuing without metadata): {e}")
+        
+        # Upload with memory-optimized strategy
+        if upload_as_document:
+            logger.info(f"📄 Uploading as document (memory-optimized)")
+            
+            with open(path, "rb") as file:
+                await context.bot.send_document(
+                    chat_id=chat_id,
+                    document=file,
+                    filename=filename,
+                    caption=caption,
+                    read_timeout=timeout_seconds,
+                    write_timeout=timeout_seconds,
+                    connect_timeout=60,
+                    thumbnail=open(thumb, "rb") if thumb else None,
+                )
+            logger.info(f"✅ Document uploaded successfully")
+            
+        else:
+            # Try smart upload based on file type for smaller files
+            try:
+                if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v", ".mkv"):
+                    logger.info(f"📹 Uploading as video...")
+                    
+                    with open(path, "rb") as file:
+                        await context.bot.send_video(
+                            chat_id=chat_id,
+                            video=file,
+                            filename=filename,
+                            caption=caption,
+                            supports_streaming=True,
+                            duration=duration if duration else None,
+                            width=1280,
+                            height=720,
+                            read_timeout=timeout_seconds,
+                            write_timeout=timeout_seconds,
+                            connect_timeout=60,
+                            thumbnail=open(thumb, "rb") if thumb else None,
+                        )
+                    logger.info(f"✅ Video uploaded successfully")
+                
+                elif (mime and mime.startswith("audio/")) or ext in (".mp3",".m4a",".aac",".flac",".ogg",".opus"):
+                    logger.info(f"🎵 Uploading as audio...")
+                    
+                    with open(path, "rb") as file:
+                        await context.bot.send_audio(
+                            chat_id=chat_id,
+                            audio=file,
+                            filename=filename,
+                            caption=caption,
+                            duration=duration if duration else None,
+                            read_timeout=timeout_seconds,
+                            write_timeout=timeout_seconds,
+                            connect_timeout=60,
+                            thumbnail=open(thumb, "rb") if thumb else None,
+                        )
+                    logger.info(f"✅ Audio uploaded successfully")
+                
+                elif (mime and mime.startswith("image/")) or ext in (".jpg",".jpeg",".png",".webp"):
+                    logger.info(f"🖼️ Uploading as photo...")
+                    
+                    with open(path, "rb") as file:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=file,
+                            filename=filename,
+                            caption=caption,
+                            read_timeout=timeout_seconds,
+                            write_timeout=timeout_seconds,
+                            connect_timeout=60,
+                        )
+                    logger.info(f"✅ Photo uploaded successfully")
+                
+                else:
+                    logger.info(f"📄 Uploading as document...")
+                    
+                    with open(path, "rb") as file:
+                        await context.bot.send_document(
+                            chat_id=chat_id,
+                            document=file,
+                            filename=filename,
+                            caption=caption,
+                            read_timeout=timeout_seconds,
+                            write_timeout=timeout_seconds,
+                            connect_timeout=60,
+                            thumbnail=open(thumb, "rb") if thumb else None,
+                        )
+                    logger.info(f"✅ Document uploaded successfully")
+                    
+            except Exception as upload_error:
+                logger.warning(f"⚠️ Primary upload failed, fallback to document: {upload_error}")
+                
+                # Fallback to document upload
+                with open(path, "rb") as file:
+                    await context.bot.send_document(
+                        chat_id=chat_id,
+                        document=file,
+                        filename=filename,
+                        caption=caption,
+                        read_timeout=timeout_seconds,
+                        write_timeout=timeout_seconds,
+                        connect_timeout=60,
+                    )
+                logger.info(f"✅ Fallback document upload successful")
+        
+        # Post-upload cleanup
+        await MemoryManager.cleanup_memory()
+        return True
+        
+    except (NetworkError, TimedOut) as network_error:
+        logger.error(f"❌ Network error during upload: {network_error}")
+        return False
+        
+    except RetryAfter as retry_error:
+        logger.warning(f"⏳ Rate limited, need to wait {retry_error.retry_after} seconds")
+        return False
+        
     except Exception as e:
-        logger.warning(f"⚠️ Media probe error: {e}")
-    
-    try:
-        if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v", ".mkv"):
-            logger.info(f"📹 Sending as video...")
-            await context.bot.send_video(
-                chat_id=chat_id,
-                video=open(path, "rb"),
-                caption=caption,
-                supports_streaming=True,
-                duration=duration if duration else None,
-                width=1280,
-                height=720,
-                thumbnail=open(thumb, "rb") if thumb else None,
-            )
-            logger.info(f"✅ Video sent successfully")
-            return
-        
-        if (mime and mime.startswith("audio/")) or ext in (".mp3",".m4a",".aac",".flac",".ogg",".opus"):
-            logger.info(f"🎵 Sending as audio...")
-            await context.bot.send_audio(
-                chat_id=chat_id,
-                audio=open(path, "rb"),
-                caption=caption,
-                duration=duration if duration else None,
-                thumbnail=open(thumb, "rb") if thumb else None,
-            )
-            logger.info(f"✅ Audio sent successfully")
-            return
-        
-        if (mime and mime.startswith("image/")) or ext in (".jpg",".jpeg",".png",".webp"):
-            logger.info(f"🖼️ Sending as photo...")
-            await context.bot.send_photo(
-                chat_id=chat_id,
-                photo=open(path, "rb"),
-                caption=caption,
-            )
-            logger.info(f"✅ Photo sent successfully")
-            return
-        
-        logger.info(f"📄 Sending as document...")
-        await context.bot.send_document(
-            chat_id=chat_id,
-            document=open(path, "rb"),
-            caption=caption,
-            thumbnail=open(thumb, "rb") if thumb else None,
-        )
-        logger.info(f"✅ Document sent successfully")
-        
-    except Exception as e:
-        logger.error(f"❌ Media send error: {e}")
-        raise
+        logger.error(f"❌ Upload failed with error: {e}")
+        return False
         
     finally:
+        # Cleanup thumbnail file
         try:
             if thumb and os.path.exists(thumb):
                 os.remove(thumb)
-                logger.info(f"🗑️ Thumbnail cleaned up")
+                logger.debug(f"🗑️ Thumbnail cleaned up")
         except Exception as e:
             logger.warning(f"⚠️ Thumbnail cleanup error: {e}")
 
-# ---------- Enhanced Handler with Debug Logging ----------
-
+# ---------- File Size Checker ----------
+def check_file_size_limit(file_size: int, max_size: int = 80 * 1024 * 1024) -> tuple[bool, str]:
+    """Check if file size is within limits for free tier hosting"""
+    if file_size > max_size:
+        return False, f"File size {_fmt_size(file_size)} exceeds limit of {_fmt_size(max_size)}"
+    return True, ""
+# ---------- Enhanced Handler with Memory Management ----------
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # COMPREHENSIVE DEBUG LOGGING
     logger.info(f"🎯 ===== LEECH HANDLER CALLED =====")
@@ -168,10 +307,13 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logger.info(f"🎯 Message text: '{update.effective_message.text}'")
     logger.info(f"🎯 Message type: {type(update.effective_message.text)}")
     
+    # Initial memory check
+    memory_info = await MemoryManager.get_memory_info()
+    logger.info(f"🧠 Initial memory: {memory_info.get('available', 0):.1f}MB available")
+    
     chat_id = update.effective_chat.id
     text = update.effective_message.text or ""
     parts = text.split(maxsplit=1)
-    
     logger.info(f"🎯 Text parts: {parts}")
     logger.info(f"🎯 Parts length: {len(parts)}")
     
@@ -189,13 +331,19 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Send initial status message
     try:
-        status = await context.bot.send_message(chat_id, "🔎 Resolving Terabox link...")
+        status = await context.bot.send_message(
+            chat_id, 
+            f"🔎 Resolving Terabox link...\n🧠 Memory: {memory_info.get('available', 0):.0f}MB available"
+        )
         logger.info(f"✅ Status message sent - ID: {status.message_id}")
     except Exception as e:
         logger.error(f"❌ Failed to send status message: {e}")
         return
     
     try:
+        # Memory cleanup before resolution
+        await MemoryManager.cleanup_memory()
+        
         # Get resolver instance with comprehensive logging
         logger.info(f"🔧 Getting resolver instance...")
         resolver = await get_resolver()
@@ -230,11 +378,35 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     title = meta.name or "file"
     total = meta.size
-    
     logger.info(f"📝 File details - Name: {title}, Size: {_fmt_size(total)}")
     
+    # File size check for free tier
+    if total:
+        size_ok, size_error = check_file_size_limit(total)
+        if not size_ok:
+            try:
+                await status.edit_text(
+                    f"❌ **File Too Large for Free Tier**\n\n"
+                    f"📂 **Name:** {title}\n"
+                    f"📏 **Size:** {_fmt_size(total)}\n"
+                    f"⚠️ **Limit:** 80MB for free tier hosting\n\n"
+                    f"**Solutions:**\n"
+                    f"• Try a smaller file\n"
+                    f"• Use premium hosting for larger files\n"
+                    f"• File compression may help"
+                )
+            except Exception as e:
+                logger.error(f"❌ Failed to send size limit message: {e}")
+            return
+    
     try:
-        await status.edit_text(f"📝 Name: {title}\n🗂️ Size: {_fmt_size(total)}\n📁 Total Files: 1")
+        await status.edit_text(
+            f"📝 **File Information**\n\n"
+            f"📂 **Name:** {title}\n"
+            f"🗂️ **Size:** {_fmt_size(total)}\n"
+            f"📁 **Total Files:** 1\n"
+            f"🧠 **Memory:** {memory_info.get('available', 0):.0f}MB available"
+        )
         logger.info(f"✅ File info sent to user")
     except Exception as e:
         logger.error(f"❌ Failed to update status with file info: {e}")
@@ -268,22 +440,28 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 speed = done / elapsed
                 eta = (total - done) / speed if total and speed > 0 else 0
                 
+                # Get current memory for progress display
+                current_memory = await MemoryManager.get_memory_info()
+                memory_mb = current_memory.get('available', 0)
+                
                 text = (
                     f"⏩ 📥 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
                     f"{bar} {p*100:0.2f}%\n"
                     f"📦 Processed: {_fmt_size(done)}\n"
                     f"🗂️ Size: {_fmt_size(total)}\n"
                     f"🚀 Speed: {_fmt_size(int(speed))}/s\n"
-                    f"⏳ ETA: {_fmt_eta(eta)}"
+                    f"⏳ ETA: {_fmt_eta(eta)}\n"
+                    f"🧠 Memory: {memory_mb:.0f}MB free"
                 )
                 
                 await context.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text)
                 
                 if loop_count % 10 == 0:  # Log every 10 updates (30 seconds)
-                    logger.info(f"🔄 Progress update #{loop_count}: {p*100:.1f}% complete")
+                    logger.info(f"🔄 Progress update #{loop_count}: {p*100:.1f}% complete, {memory_mb:.0f}MB free")
                     
             except Exception as e:
                 logger.warning(f"⚠️ Progress update error: {e}")
+            
             await asyncio.sleep(3)
     
     updater_task = asyncio.create_task(progress_loop(status.message_id))
@@ -293,44 +471,92 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.info(f"⬇️ Starting download process...")
         await status.edit_text("⬇️ Starting download...")
         
+        # Download with existing robust downloader
         temp_path, meta = await fetch_to_temp(meta, on_progress=_on_progress)
         logger.info(f"✅ Download completed - Path: {temp_path}")
         
         running = False
-        await asyncio.sleep(0)
+        await asyncio.sleep(0)  # Allow progress loop to exit
         
-        done = bytes_done
+        # Verify downloaded file
+        if not temp_path or not os.path.exists(temp_path):
+            raise Exception("Downloaded file missing or invalid")
+        
+        actual_size = os.path.getsize(temp_path)
+        done = bytes_done or actual_size
+        
+        # Final memory cleanup before upload
+        await MemoryManager.cleanup_memory()
+        final_memory = await MemoryManager.get_memory_info()
+        
         final = (
-            f"✅ Completed\n"
-            f"📄 Name: {title}\n"
-            f"🗂️ Size: {_fmt_size(total)}\n"
-            f"📦 Processed: {_fmt_size(done)}\n"
+            f"✅ **Download Completed**\n\n"
+            f"📄 **Name:** {title}\n"
+            f"🗂️ **Size:** {_fmt_size(total)}\n"
+            f"📦 **Downloaded:** {_fmt_size(done)}\n"
+            f"🧠 **Memory:** {final_memory.get('available', 0):.0f}MB free\n\n"
+            f"📤 **Starting optimized upload...**\n"
             f"{BOT_FOOTER}"
         )
         
         try:
             await status.edit_text(final)
-            logger.info(f"✅ Completion message sent")
+            logger.info(f"✅ Download completion message sent")
         except Exception as e:
             logger.warning(f"⚠️ Failed to edit completion message: {e}")
         
-        logger.info(f"📤 Starting media upload...")
-        await _send_media(context, chat_id, temp_path, meta.name or title)
-        logger.info(f"✅ Media upload completed")
+        logger.info(f"📤 Starting optimized media upload...")
         
-        try:
-            await status.delete()
-            logger.info(f"🗑️ Status message cleaned up")
-        except Exception as e:
-            logger.warning(f"⚠️ Status cleanup error: {e}")
-            
+        # Use optimized upload function
+        upload_success = await _send_media_optimized(context, chat_id, temp_path, meta.name or title)
+        
+        if upload_success:
+            logger.info(f"✅ Media upload completed successfully")
+            try:
+                await status.edit_text(
+                    f"✅ **Upload Completed Successfully**\n\n"
+                    f"📄 **Name:** {title}\n"
+                    f"🗂️ **Size:** {_fmt_size(actual_size)}\n"
+                    f"📦 **Processed:** {_fmt_size(done)}\n"
+                    f"🎉 **Successfully uploaded to Telegram!**\n\n"
+                    f"{BOT_FOOTER}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Final status update failed: {e}")
+        else:
+            logger.error(f"❌ Media upload failed")
+            error_memory = await MemoryManager.get_memory_info()
+            try:
+                await status.edit_text(
+                    f"❌ **Upload Failed**\n\n"
+                    f"📄 **Name:** {title}\n"
+                    f"🗂️ **Size:** {_fmt_size(actual_size)}\n"
+                    f"🧠 **Memory:** {error_memory.get('available', 0):.0f}MB available\n\n"
+                    f"**Possible causes:**\n"
+                    f"• Insufficient memory for upload\n"
+                    f"• Network timeout\n"
+                    f"• Telegram API rate limiting\n\n"
+                    f"**The download was successful - issue is with upload only**"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to send upload error message: {e}")
+        
+        # Cleanup status message for successful uploads
+        if upload_success:
+            try:
+                await asyncio.sleep(2)  # Brief delay before cleanup
+                await status.delete()
+                logger.info(f"🗑️ Status message cleaned up")
+            except Exception as e:
+                logger.warning(f"⚠️ Status cleanup error: {e}")
+                
     except Exception as e:
         logger.error(f"❌ Download/Upload error: {e}")
         logger.error(f"❌ Error type: {type(e)}")
         
         running = False
-        error_msg = str(e)
         
+        error_msg = str(e)
         if "HTTP 400" in error_msg or "400" in error_msg or "expired" in error_msg.lower():
             response_text = "❌ Download failed: Link expired or server rejected request. Please get a fresh link from Terabox."
         elif "timeout" in error_msg.lower():
@@ -348,6 +574,8 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     finally:
         running = False
+        
+        # Cleanup progress task
         try:
             if updater_task:
                 updater_task.cancel()
@@ -359,6 +587,7 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.warning(f"⚠️ Task cleanup error: {e}")
         
+        # Cleanup temporary file
         if temp_path and os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -366,21 +595,23 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.warning(f"⚠️ Temp file cleanup error: {e}")
         
+        # Final memory cleanup
+        await MemoryManager.cleanup_memory()
+        
         logger.info(f"🎯 ===== LEECH HANDLER COMPLETED =====")
 
 # ---------- Cleanup Handler ----------
-
 async def cleanup_handler():
     """Cleanup resources on shutdown"""
     logger.info(f"🧹 Running cleanup...")
     try:
         await cleanup_resolver()
+        await MemoryManager.cleanup_memory()
         logger.info(f"✅ Cleanup completed")
     except Exception as e:
         logger.error(f"❌ Cleanup error: {e}")
 
 # ---------- Export ----------
-
 leech_handler = leech_handler_v2
 
 def get_enhanced_handler():
