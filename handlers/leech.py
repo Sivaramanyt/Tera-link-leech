@@ -13,7 +13,7 @@ from telegram.ext import ContextTypes, CommandHandler
 from services.terabox import TeraboxResolver
 from services.downloader import fetch_to_temp
 
-# ---------------- Formatting helpers ----------------
+# ---------- Formatting ----------
 def _fmt_size(n: int | None) -> str:
     if n is None:
         return "unknown"
@@ -39,7 +39,7 @@ def _fmt_eta(sec: float) -> str:
         return f"{m}m{s}s"
     return f"{s}s"
 
-# ---------------- Caption/footer ----------------
+# ---------- Caption/footer ----------
 BOT_FOOTER = "via @Terabox_leech_pro_bot"
 
 def _with_footer(text: str) -> str:
@@ -49,13 +49,11 @@ def _with_footer(text: str) -> str:
         return text
     return f"{text}\n{BOT_FOOTER}"
 
-# ---------------- ffmpeg helpers (optional) ----------------
+# ---------- ffmpeg helpers (optional) ----------
 def _probe_duration_seconds(path: str) -> int | None:
     try:
         out = subprocess.check_output(
-            ["ffprobe","-v","error","-select_streams","v:0",
-             " -show_entries","format=duration","-show_entries","format=duration",
-             "-of","default=nk=1:nw=1", path],
+            ["ffprobe","-v","error","-show_entries","format=duration","-of","default=nk=1:nw=1", path],
             stderr=subprocess.STDOUT, text=True
         ).strip()
         if out:
@@ -76,7 +74,7 @@ def _make_video_thumb(path: str) -> str | None:
     except Exception:
         return None
 
-# ---------------- Media sender ----------------
+# ---------- Media sender ----------
 async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: str, filename: str):
     mime, _ = guess_type(filename)
     ext = (os.path.splitext(filename)[1] or "").lower()
@@ -85,7 +83,7 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
     duration = None
     thumb = None
     try:
-        if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime.startswith("video/")):
+        if ext in (".mp4",".mov",".m4v",".mkv") or (mime and mime and mime.startswith("video/")):
             duration = _probe_duration_seconds(path)
             thumb = _make_video_thumb(path)
     except Exception:
@@ -93,7 +91,7 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
 
     try:
         # Video
-        if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v"):
+        if (mime and mime.startswith("video/")) or ext in (".mp4", ".mov", ".m4v", ".mkv"):
             await context.bot.send_video(
                 chat_id=chat_id,
                 video=open(path, "rb"),
@@ -123,7 +121,7 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
                 caption=caption,
             )
             return
-        # Fallback
+        # Fallback document
         await context.bot.send_document(
             chat_id=chat_id,
             document=open(path, "rb"),
@@ -137,10 +135,9 @@ async def _send_media(context: ContextTypes.DEFAULT_TYPE, chat_id: int, path: st
         except Exception:
             pass
 
-# ---------------- Resolver ----------------
+# ---------- Resolver and handler ----------
 resolver_v2 = TeraboxResolver()
 
-# ---------------- Enhanced handler with real-time progress ----------------
 async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     text = update.effective_message.text or ""
@@ -151,7 +148,6 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     share_url = parts[1].replace("\\", "/").strip()
 
-    # Initial status
     status = await context.bot.send_message(chat_id, "🔎 Resolving Terabox link...")
     try:
         meta = await resolver_v2.resolve(share_url)
@@ -186,8 +182,8 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 speed = done / elapsed
                 eta = (total - done) / speed if total and speed > 0 else 0
                 text = (
-                    f"📥 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"⏩ {bar} {p*100:0.2f}%\n"
+                    f"⏩ 📥 {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    f"{bar} {p*100:0.2f}%\n"
                     f"📦 Processed: {_fmt_size(done)}\n"
                     f"🗂️ Size: {_fmt_size(total)}\n"
                     f"🚀 Speed: {_fmt_size(int(speed))}/s\n"
@@ -244,9 +240,9 @@ async def leech_handler_v2(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-# Backward-compat alias (old import path)
+# Backward compat
 leech_handler = leech_handler_v2
 
 def get_enhanced_handler():
     return CommandHandler("leech", leech_handler_v2)
-    
+        
