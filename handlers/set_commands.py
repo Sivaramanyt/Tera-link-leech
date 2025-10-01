@@ -1,3 +1,4 @@
+
 from telegram import BotCommand
 
 async def set_bot_commands(application):
@@ -7,4 +8,4 @@ async def set_bot_commands(application):
         BotCommand("verify", "Verify token for premium usage"),
     ]
     await application.bot.set_my_commands(commands)
-    
+
