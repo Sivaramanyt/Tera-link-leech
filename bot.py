@@ -1,105 +1,41 @@
-import os
-import sys
-import logging
 import asyncio
-import signal
-
-from telegram.ext import Application, CommandHandler
-
+import logging
+import os
+from telegram.ext import Application
 from handlers.start import start_handler
 from handlers.leech import leech_handler
-from handlers.verification import verify_command_handler
-from handlers.health import run_health_server
+from handlers.verification import verify_handler  # Replace with your verification handler name
 from handlers.set_commands import set_bot_commands
 
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger(__name__)
 
-def ensure_single_instance():
-    import tempfile
-    import fcntl
-    try:
-        lock_file = os.path.join(tempfile.gettempdir(), 'terabox_bot.lock')
-        lock_fd = open(lock_file, 'w')
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        lock_fd.write(str(os.getpid()))
-        lock_fd.flush()
-        return lock_fd
-    except Exception:
-        logger.error("Another instance is already running.")
-        sys.exit(1)
-
-def setup_graceful_shutdown(app):
-
-    def shutdown_signal_handler(signum, frame):
-        logger.info(f"Received exit signal {signum}, shutting down...")
-        loop = asyncio.get_event_loop()
-        loop.create_task(graceful_shutdown(app))
-
-    async def graceful_shutdown(app):
-        try:
-            await app.updater.stop()
-            await app.stop()
-            await app.shutdown()
-            logger.info("Bot shutdown complete.")
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-        finally:
-            loop = asyncio.get_event_loop()
-            loop.stop()
-
-    signal.signal(signal.SIGINT, shutdown_signal_handler)
-    signal.signal(signal.SIGTERM, shutdown_signal_handler)
-
-async def run_bot():
-    bot_token = os.getenv('BOT_TOKEN')
+async def main():
+    bot_token = os.getenv("BOT_TOKEN")
     if not bot_token:
-        logger.error("Missing BOT_TOKEN environment variable")
-        sys.exit(1)
+        logger.error("BOT_TOKEN environment variable is not set.")
+        return
 
-    global app
+    logger.info("Starting Terabox Leech Bot...")
+
     app = Application.builder().token(bot_token).build()
 
-    setup_graceful_shutdown(app)
-
-    # Register handlers
+    # Register handlers (must be instances, not functions)
     app.add_handler(start_handler)
     app.add_handler(leech_handler)
-    app.add_handler(verify_command_handler)
-    app.add_error_handler(lambda update, context: logger.error(f"Update error: {context.error}"))
+    app.add_handler(verify_handler)
 
-    # Register bot commands in BotFather UI
+    # Set bot commands globally
     await set_bot_commands(app)
 
-    await app.initialize()
+    # Start the bot
     await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except (asyncio.CancelledError, KeyboardInterrupt):
-        logger.info("Bot stopping")
-
-async def main():
-    try:
-        ensure_single_instance()
-        logger.info("Starting Terabox Leech Bot...")
-        await asyncio.gather(
-            run_health_server(),
-            run_bot()
-        )
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
-        sys.exit(1)
+    await app.updater.start_polling()
+    await app.idle()
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Startup error: {e}")
-        sys.exit(1)
-        
+    asyncio.run(main())
+    
