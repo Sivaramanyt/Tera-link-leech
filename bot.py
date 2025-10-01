@@ -4,11 +4,12 @@ import logging
 import asyncio
 import signal
 
-from telegram.ext import Application
+from telegram.ext import Application, CommandHandler
 
 from handlers.start import start_handler
 from handlers.leech import leech_handler
-from handlers.health import SimpleHealthServer, run_health_server
+from handlers.verification import verify_command_handler
+from handlers.health import run_health_server
 from handlers.set_commands import set_bot_commands
 
 logger = logging.getLogger(__name__)
@@ -63,9 +64,10 @@ async def run_bot():
     # Register handlers
     app.add_handler(start_handler)
     app.add_handler(leech_handler)
+    app.add_handler(verify_command_handler)
     app.add_error_handler(lambda update, context: logger.error(f"Update error: {context.error}"))
 
-    # Set commands for BotFather UI
+    # Register bot commands in BotFather UI
     await set_bot_commands(app)
 
     await app.initialize()
@@ -100,3 +102,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Startup error: {e}")
         sys.exit(1)
+        
