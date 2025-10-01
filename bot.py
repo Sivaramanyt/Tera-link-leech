@@ -10,6 +10,7 @@ import re
 import json
 import httpx
 import psutil
+import signal
 from telegram.ext import Application, CommandHandler
 
 try:
@@ -219,7 +220,7 @@ async def debug_handler(update, context):
     mem = psutil.virtual_memory()
     await update.message.reply_text(
         f"🤖 Phase 2.1 Debug Info\n\n"
-        f"Mem Available: {mem.available/(1024*1024):.1f}MB\n"
+        f"Mem Available: {mem.available / (1024 * 1024):.1f}MB\n"
         f"CPU Load: {psutil.cpu_percent()}%\n"
         f"Brotli: {'Available' if HAS_BROTLI else 'Missing'}\n"
         f"HTTPX Version: {httpx.__version__}"
@@ -259,7 +260,9 @@ async def phase21_leech_handler(update, context):
         elapsed = time.time() - start_time
         actual_size = os.path.getsize(temp_path)
         avg_speed = actual_size / elapsed if elapsed > 0 else 0
-        await status.edit_text(f"Download complete: {filename}\n{format_size(actual_size)} in {elapsed:.1f}s\nSpeed: {format_size(int(avg_speed))}/s\nUploading...")
+        await status.edit_text(
+            f"Download complete: {filename}\n{format_size(actual_size)} in {elapsed:.1f}s\nSpeed: {format_size(int(avg_speed))}/s\nUploading..."
+        )
         try:
             with open(temp_path, 'rb') as f:
                 await context.bot.send_document(
@@ -295,28 +298,55 @@ async def run_health_server():
     await SimpleHealthServer().start(port)
 
 
+def setup_graceful_shutdown(app):
+    def shutdown_signal_handler(signum, frame):
+        logger.info(f"Received exit signal {signum}, shutting down...")
+        loop = asyncio.get_event_loop()
+        loop.create_task(graceful_shutdown(app))
+
+    async def graceful_shutdown(app):
+        try:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+            logger.info("Bot shutdown complete.")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        finally:
+            loop = asyncio.get_event_loop()
+            loop.stop()
+
+    signal.signal(signal.SIGINT, shutdown_signal_handler)
+    signal.signal(signal.SIGTERM, shutdown_signal_handler)
+
+
 async def run_bot():
     bot_token = os.getenv('BOT_TOKEN')
     if not bot_token:
         logger.error("Missing BOT_TOKEN")
         sys.exit(1)
+
+    global app
     app = Application.builder().token(bot_token).build()
+
+    setup_graceful_shutdown(app)
+
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("leech", phase21_leech_handler))
     app.add_handler(CommandHandler("debug", debug_handler))
     app.add_error_handler(error_handler)
+
     await app.initialize()
     await app.start()
     await app.updater.start_polling(drop_pending_updates=True)
+
     try:
         while True:
             await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        logger.info("Run bot task cancelled")
     except KeyboardInterrupt:
-        pass
-    finally:
-        await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        logger.info("Keyboard interrupt received")
 
 
 async def main():
@@ -337,3 +367,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Startup error: {e}")
         sys.exit(1)
+        
