@@ -2,13 +2,14 @@ import asyncio
 import logging
 import os
 from telegram.ext import Application
+
 from handlers.start import start_handler
 from handlers.leech import leech_handler
 from handlers.set_commands import set_bot_commands
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO
+    level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,17 @@ async def main():
 
     app = Application.builder().token(bot_token).build()
 
-    # Register only working handlers
+    # Register handlers
     app.add_handler(start_handler)
     app.add_handler(leech_handler)
 
-    # Set bot commands
+    # Initialize application manually before starting
+    await app.initialize()
+
+    # Set bot commands (e.g. /start, /leech)
     await set_bot_commands(app)
 
-    # Start the bot
+    # Start the application
     await app.start()
     await app.updater.start_polling()
     await app.idle()
