@@ -1,3 +1,4 @@
+
 import logging
 import os
 import asyncio
@@ -6,7 +7,7 @@ from telegram.ext import Application
 from handlers.start import start_handler
 from handlers.leech import leech_handler
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from set_commands import set_bot_commands # Import the actual set_bot_commands function
+from handlers.set_commands import set_bot_commands # CORRECTED IMPORT PATH
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
