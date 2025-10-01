@@ -1,4 +1,4 @@
-
+ 
 import logging
 import os
 import asyncio
@@ -7,7 +7,7 @@ from telegram.ext import Application
 from handlers.start import start_handler
 from handlers.leech import leech_handler
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from handlers.set_commands import set_bot_commands # CORRECTED IMPORT PATH
+from handlers.set_commands import set_bot_commands # Corrected import path
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -56,7 +56,7 @@ def main():
     app.add_error_handler(error_handler)
 
     # Run the actual command setup using post_init
-    # THIS LINE WILL FAIL IF set_bot_commands IS NOT A FUNCTION
+    # THIS LINE WILL NOW USE THE DEBUGGED set_bot_commands
     app.post_init(set_bot_commands) 
 
     # Run the bot synchronously (internally manages event loop)
