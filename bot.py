@@ -1,221 +1,210 @@
-# Add to your bot.py - ENHANCED LEECH HANDLER
+#!/usr/bin/env python3
+# bot.py - ENHANCED SAFE VERSION USING ONLY YOUR 3 PACKAGES
 
-import tempfile
-import os
-import httpx
-import json
-import re
 import asyncio
+import logging
+import os
+import sys
+import tempfile
+import fcntl
 import time
+import httpx
+import psutil
+from telegram.ext import Application, CommandHandler
 
-async def enhanced_terabox_resolve(url: str):
-    """Simple terabox resolver using wdzone API"""
-    try:
-        logger.info(f"🌐 Resolving: {url}")
-        
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                "https://wdzone-terabox-api.vercel.app/api",
-                params={"url": url}
-            )
-            
-            if response.status_code != 200:
-                return None, None, None
-            
-            data = response.json()
-            
-            if data.get("✅ Status") != "Success":
-                return None, None, None
-            
-            extracted_info = data.get("📜 Extracted Info")
-            if not extracted_info or not isinstance(extracted_info, list):
-                return None, None, None
-            
-            file_info = extracted_info[0]
-            
-            download_url = file_info.get("🔽 Direct Download Link")
-            filename = file_info.get("📂 Title")
-            size_str = file_info.get("📏 Size")
-            
-            # Parse size to bytes
-            size_bytes = None
-            if size_str:
-                match = re.match(r'([0-9.]+)\s*([KMGT]?B)', size_str.upper())
-                if match:
-                    number = float(match.group(1))
-                    unit = match.group(2)
-                    multipliers = {'B': 1, 'KB': 1024, 'MB': 1024**2, 'GB': 1024**3}
-                    size_bytes = int(number * multipliers.get(unit, 1))
-            
-            logger.info(f"✅ Resolved: {filename} ({size_bytes} bytes)")
-            return download_url, filename, size_bytes
-            
-    except Exception as e:
-        logger.error(f"❌ Resolve error: {e}")
-        return None, None, None
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger(__name__)
 
-async def enhanced_download_file(url: str, filename: str, on_progress=None):
-    """Enhanced file downloader with progress"""
-    try:
-        logger.info(f"⬇️ Starting download: {filename}")
-        
-        # Create temp file
-        fd, temp_path = tempfile.mkstemp(prefix="terabox_", suffix=f"_{filename}")
-        os.close(fd)
-        
-        async with httpx.AsyncClient(timeout=300.0) as client:
-            async with client.stream("GET", url) as response:
-                if response.status_code != 200:
-                    logger.error(f"❌ Download failed: HTTP {response.status_code}")
-                    return None
-                
-                total_size = int(response.headers.get("content-length", 0))
-                downloaded = 0
-                
-                with open(temp_path, "wb") as f:
-                    async for chunk in response.aiter_bytes(512 * 1024):  # 512KB chunks
-                        if chunk:
-                            f.write(chunk)
-                            downloaded += len(chunk)
-                            
-                            if on_progress and total_size > 0:
-                                progress = downloaded / total_size
-                                on_progress(downloaded, total_size, progress)
-        
-        logger.info(f"✅ Download completed: {temp_path}")
-        return temp_path
-        
-    except Exception as e:
-        logger.error(f"❌ Download error: {e}")
-        return None
-
-async def enhanced_leech_handler(update, context):
-    """Enhanced leech handler with real download functionality"""
-    text = update.effective_message.text or ""
-    parts = text.split(maxsplit=1)
-    
-    if len(parts) < 2:
-        await update.message.reply_text(
-            "**🔥 Enhanced Terabox Leech Pro Bot 🔥**\n\n"
-            "**Usage:** `/leech <terabox_link>`\n\n"
-            "**Enhanced Features:**\n"
-            "✅ 120MB limit for maximum speed\n"
-            "✅ Real-time progress tracking\n"
-            "✅ Memory-optimized downloads\n"
-            "✅ Streaming uploads\n\n"
-            "**Example:**\n"
-            "`/leech https://terabox.com/s/1abc...`"
-        )
-        return
-    
-    url = parts[1].strip()
-    chat_id = update.effective_chat.id
-    
-    # Validate URL
-    if not any(domain in url.lower() for domain in ["terabox", "1024tera"]):
-        await update.message.reply_text("❌ Please provide a valid Terabox link.")
-        return
-    
-    # Start processing
-    status = await update.message.reply_text("🔍 **Resolving Terabox link...**")
-    
-    try:
-        # Step 1: Resolve URL
-        logger.info(f"🎯 Processing: {url}")
-        download_url, filename, file_size = await enhanced_terabox_resolve(url)
-        
-        if not download_url:
-            await status.edit_text("❌ **Link Resolution Failed**\n\nLink expired or invalid. Please get a fresh link from Terabox.")
-            return
-        
-        # Step 2: Check file size (120MB limit)
-        MAX_SIZE = 120 * 1024 * 1024  # 120MB
-        if file_size and file_size > MAX_SIZE:
-            size_mb = file_size / (1024 * 1024)
-            await status.edit_text(
-                f"⚖️ **File Too Large**\n\n"
-                f"📂 **File:** {filename}\n"
-                f"📏 **Size:** {size_mb:.1f} MB\n"
-                f"🚫 **Limit:** 120 MB\n\n"
-                f"💡 **Why 120MB?**\n"
-                f"• Optimized for maximum speed (1+ MB/s)\n"
-                f"• Memory-safe for free tier hosting\n"
-                f"• Streaming upload prevents crashes"
-            )
-            return
-        
-        # Step 3: Show file info
-        await status.edit_text(
-            f"📁 **Enhanced File Information**\n\n"
-            f"📂 **Name:** {filename}\n"
-            f"📏 **Size:** {file_size / (1024*1024):.1f} MB\n"
-            f"🚀 **Expected Speed:** {'1-3 MB/s' if file_size > 50*1024*1024 else '500KB-1MB/s'}\n\n"
-            f"⬇️ **Starting enhanced download...**"
-        )
-        
-        # Step 4: Download with progress
-        start_time = time.time()
-        last_update = 0
-        
-        def progress_callback(downloaded, total, progress):
-            nonlocal last_update
-            current_time = time.time()
-            
-            # Update every 3 seconds
-            if current_time - last_update >= 3:
-                elapsed = current_time - start_time
-                speed = downloaded / elapsed if elapsed > 0 else 0
-                eta = (total - downloaded) / speed if speed > 0 else 0
-                
-                # Create progress bar
-                bar_length = 20
-                filled = int(progress * bar_length)
-                bar = "█" * filled + "░" * (bar_length - filled)
-                
-                asyncio.create_task(status.edit_text(
-                    f"🚀 **ENHANCED DOWNLOAD** 🚀\n\n"
-                    f"📊 **Progress:** `{bar}` {progress*100:.1f}%\n\n"
-                    f"📥 **Downloaded:** {downloaded/(1024*1024):.1f} MB\n"
-                    f"📏 **Total:** {total/(1024*1024):.1f} MB\n"
-                    f"⚡ **Speed:** {speed/(1024*1024):.1f} MB/s\n"
-                    f"⏱️ **ETA:** {eta:.0f}s"
-                ))
-                
-                last_update = current_time
-        
-        temp_path = await enhanced_download_file(download_url, filename, progress_callback)
-        
-        if not temp_path:
-            await status.edit_text("❌ **Download Failed**\n\nServer error or connection timeout. Please try again.")
-            return
-        
-        # Step 5: Upload to Telegram
-        await status.edit_text(
-            f"✅ **Download Completed!**\n\n"
-            f"📁 **Name:** {filename}\n"
-            f"📏 **Size:** {file_size/(1024*1024):.1f} MB\n"
-            f"⏱️ **Time:** {time.time() - start_time:.1f}s\n\n"
-            f"📤 **Starting upload to Telegram...**"
-        )
-        
-        # Simple upload (will enhance with streaming later)
-        with open(temp_path, 'rb') as f:
-            await context.bot.send_document(
-                chat_id=chat_id,
-                document=f,
-                caption=f"📁 **{filename}**\n📏 **Size:** {file_size/(1024*1024):.1f} MB\n\n💎 via @Terabox_leech_pro_bot",
-                filename=filename
-            )
-        
-        # Cleanup
+class SimpleHealthServer:
+    async def handle_request(self, reader, writer):
         try:
-            os.remove(temp_path)
-            await status.delete()
-            logger.info(f"✅ Enhanced leech completed: {filename}")
+            request = await reader.read(1024)
+            response_body = '{"status": "healthy", "service": "terabox_bot"}'
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(response_body)}\r\n"
+                "Connection: close\r\n\r\n"
+                f"{response_body}"
+            )
+            writer.write(response.encode('utf-8'))
+            await writer.drain()
+            writer.close()
         except Exception as e:
-            logger.warning(f"⚠️ Cleanup error: {e}")
-            
+            logger.warning(f"Health server error: {e}")
+    
+    async def start(self, port):
+        server = await asyncio.start_server(self.handle_request, '0.0.0.0', port)
+        logger.info(f"🏥 Health server started on port {port}")
+        async with server:
+            await server.serve_forever()
+
+def ensure_single_instance():
+    try:
+        lock_file = os.path.join(tempfile.gettempdir(), 'terabox_bot.lock')
+        lock_fd = open(lock_file, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        lock_fd.write(str(os.getpid()))
+        lock_fd.flush()
+        logger.info(f"🔒 Lock acquired: PID {os.getpid()}")
+        return lock_fd
+    except (IOError, OSError):
+        logger.error("❌ Another instance running!")
+        sys.exit(1)
+
+async def start_handler(update, context):
+    await update.message.reply_text(
+        "🔥 **Terabox Leech Pro Bot** 🔥\n\n"
+        "Send: `/leech <terabox_link>`\n\n"
+        "**Enhanced Features (Testing):**\n"
+        "✅ HTTPx integration ready\n"
+        "✅ Memory monitoring active\n"
+        "✅ 120MB optimization planned\n\n"
+        "**Status:** ✅ Online (Safe Enhanced)\n"
+        "**Packages:** 3 core packages only"
+    )
+
+async def debug_handler(update, context):
+    memory = psutil.virtual_memory()
+    await update.message.reply_text(
+        f"🤖 **Enhanced bot working!**\n\n"
+        f"🧠 **Memory:** {memory.available/(1024*1024):.1f}MB available\n"
+        f"📊 **CPU:** {psutil.cpu_percent()}%\n"
+        f"🔧 **HTTPx:** {httpx.__version__} ready\n"
+        f"📦 **Packages:** 3 core only"
+    )
+
+async def safe_enhanced_leech_handler(update, context):
+    """Safe enhanced leech - tests URL validation only"""
+    try:
+        text = update.effective_message.text or ""
+        parts = text.split(maxsplit=1)
+        
+        if len(parts) < 2:
+            await update.message.reply_text(
+                "**🔥 Safe Enhanced Leech Test 🔥**\n\n"
+                "**Usage:** `/leech <terabox_link>`\n\n"
+                "**Current Test Phase:**\n"
+                "✅ URL validation\n"
+                "✅ Memory monitoring\n"
+                "✅ HTTPx connection test\n"
+                "⏳ Full download (next phase)\n\n"
+                "**Example:**\n"
+                "`/leech https://terabox.com/test`"
+            )
+            return
+        
+        url = parts[1].strip()
+        
+        # Step 1: Validate URL
+        if not any(domain in url.lower() for domain in ["terabox", "1024tera"]):
+            await update.message.reply_text("❌ Please provide a valid Terabox link.")
+            return
+        
+        status = await update.message.reply_text("🔍 **Testing enhanced validation...**")
+        
+        # Step 2: Test HTTPx connection (safe test)
+        try:
+            timeout = httpx.Timeout(10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                # Test connection to a safe endpoint
+                test_response = await client.get("https://httpbin.org/status/200")
+                connection_status = "✅ HTTPx working" if test_response.status_code == 200 else "❌ HTTPx issue"
+        except Exception as e:
+            connection_status = f"⚠️ HTTPx test: {str(e)[:50]}"
+        
+        # Step 3: Memory check
+        memory = psutil.virtual_memory()
+        memory_status = f"🧠 {memory.available/(1024*1024):.0f}MB available"
+        
+        # Step 4: Show enhanced test results
+        await status.edit_text(
+            f"✅ **Enhanced Validation Complete**\n\n"
+            f"🔗 **URL:** Valid Terabox detected\n"
+            f"📡 **HTTPx:** {connection_status}\n"
+            f"🧠 **Memory:** {memory_status}\n"
+            f"📦 **Packages:** 3 core packages working\n\n"
+            f"🎯 **Next Phase:** Full download functionality\n"
+            f"💡 **Ready for:** Real terabox resolution"
+        )
+        
+        logger.info(f"✅ Safe enhanced test completed for: {url[:50]}")
+        
     except Exception as e:
-        logger.error(f"❌ Enhanced leech error: {e}")
-        await status.edit_text(f"❌ **Enhanced Operation Failed**\n\n``````")
-                                 
+        logger.error(f"❌ Safe enhanced error: {e}")
+        try:
+            await update.message.reply_text(f"❌ **Enhanced Test Error**\n\n``````")
+        except:
+            pass
+
+async def error_handler(update, context):
+    logger.error(f"❌ ERROR: {context.error}")
+
+async def run_health_server():
+    port = int(os.getenv('PORT', 8000))
+    health_server = SimpleHealthServer()
+    await health_server.start(port)
+
+async def run_bot():
+    bot_token = os.getenv('BOT_TOKEN')
+    if not bot_token:
+        logger.error("❌ BOT_TOKEN not found!")
+        sys.exit(1)
+    
+    logger.info(f"🔑 Safe enhanced bot token: {bot_token[:10]}...")
+    
+    application = Application.builder().token(bot_token).build()
+    
+    application.add_handler(CommandHandler("start", start_handler))
+    application.add_handler(CommandHandler("leech", safe_enhanced_leech_handler))
+    application.add_handler(CommandHandler("debug", debug_handler))
+    application.add_error_handler(error_handler)
+    
+    logger.info("📝 Safe enhanced handlers added")
+    
+    await application.initialize()
+    await application.start()
+    
+    logger.info("🚀 Starting safe enhanced polling...")
+    await application.updater.start_polling(drop_pending_updates=True)
+    
+    logger.info("✅ Safe enhanced bot started!")
+    
+    try:
+        while True:
+            await asyncio.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("🛑 Safe enhanced bot stopped")
+    finally:
+        await application.updater.stop()
+        await application.stop()
+        await application.shutdown()
+
+async def main():
+    try:
+        lock_fd = ensure_single_instance()
+        logger.info("🚀 Starting SAFE ENHANCED Terabox Bot...")
+        
+        await asyncio.gather(
+            run_health_server(),
+            run_bot()
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Safe enhanced bot stopped")
+    except Exception as e:
+        logger.error(f"❌ Startup error: {e}")
+        sys.exit(1)
+    
