@@ -6,6 +6,7 @@ from telegram.ext import Application
 from handlers.start import start_handler
 from handlers.leech import leech_handler
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from set_commands import set_bot_commands # Import the actual set_bot_commands function
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -13,7 +14,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# HTTP server for health check
+# HTTP server for health check (remains as a separate thread)
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
@@ -29,10 +30,6 @@ def run_health_server():
     server = HTTPServer(('0.0.0.0', 8000), HealthHandler)
     logger.info("Health server running on port 8000")
     server.serve_forever()
-
-async def dummy_set_commands(app):
-    # Minimal or empty async command setup for now
-    pass
 
 async def error_handler(update, context):
     logger.error(f"Exception while handling update: {context.error}")
@@ -57,12 +54,11 @@ def main():
     # Register error handler
     app.add_error_handler(error_handler)
 
-    # Run minimal async setup if needed
-    asyncio.run(dummy_set_commands(app))
+    # Run the actual command setup using post_init
+    app.post_init(set_bot_commands)
 
     # Run the bot synchronously (internally manages event loop)
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-    
