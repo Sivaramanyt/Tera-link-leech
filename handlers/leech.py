@@ -1,10 +1,7 @@
 import os
 import time
-import asyncio
-import tempfile
 import logging
 import psutil
-
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 
@@ -23,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_SIZE = 120 * 1024 * 1024  # 120MB
 MIN_MEMORY_MB = 150
-
 PRIVATE_CHANNEL_ID = int(os.environ.get("PRIVATE_CHANNEL_ID", 0))
 
 
