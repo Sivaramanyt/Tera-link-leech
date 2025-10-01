@@ -1,4 +1,4 @@
-# scripts/set_commands.py
+# handlers/set_commands.py
 import asyncio
 import os
 from telegram import BotCommand
