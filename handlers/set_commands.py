@@ -1,4 +1,4 @@
-from telegram.constants import BotCommandScope
+from telegram.ext.botcommand import BotCommandScopeDefault
 from telegram import BotCommand
 
 async def set_bot_commands(application):
@@ -7,6 +7,5 @@ async def set_bot_commands(application):
         BotCommand("leech", "Leech terabox link"),
         BotCommand("verify", "Verify token for premium usage")
     ]
-    # Set commands globally
-    await application.bot.set_my_commands(commands=commands, scope=BotCommandScope.DEFAULT)
+    await application.bot.set_my_commands(commands=commands, scope=BotCommandScopeDefault())
     
