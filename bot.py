@@ -56,7 +56,8 @@ def main():
     app.add_error_handler(error_handler)
 
     # Run the actual command setup using post_init
-    app.post_init(set_bot_commands)
+    # THIS LINE WILL FAIL IF set_bot_commands IS NOT A FUNCTION
+    app.post_init(set_bot_commands) 
 
     # Run the bot synchronously (internally manages event loop)
     app.run_polling()
