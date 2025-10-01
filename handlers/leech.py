@@ -73,11 +73,12 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
         resolver = await get_resolver()
         try:
             file_meta = await resolver.resolve(url)
-            download_url = file_meta.url
-            filename = file_meta.name
-            filesize = file_meta.size
         finally:
             await cleanup_resolver()
+
+        download_url = file_meta.url
+        filename = file_meta.name
+        filesize = file_meta.size
 
         if not download_url:
             await status.edit_text("Link resolution failed or expired link.")
@@ -94,14 +95,14 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         await status.edit_text(f"Downloading {filename} {_fmt_size(filesize)}")
 
-        start_time = time.time()
-        temp_path = await fetch_to_temp(download_url, filename, status, context, chat_id)
+        # Corrected fetch_to_temp call:
+        temp_path, _ = await fetch_to_temp(file_meta, on_progress=status.edit_text)
 
         if not temp_path:
             await status.edit_text("Download failed or timed out.")
             return
 
-        elapsed = time.time() - start_time
+        elapsed = time.time() - temp_path.stat().st_ctime  # Or use time diff for download duration
         actual_size = os.path.getsize(temp_path)
         avg_speed = actual_size / elapsed if elapsed > 0 else 0
 
@@ -141,4 +142,4 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 leech_handler = CommandHandler("leech", phase21_leech_handler)
-            
+        
