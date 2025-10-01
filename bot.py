@@ -23,20 +23,13 @@ async def main():
 
     app = Application.builder().token(bot_token).build()
 
-    # Register handlers
     app.add_handler(start_handler)
     app.add_handler(leech_handler)
 
-    # Initialize application manually before starting
-    await app.initialize()
-
-    # Set bot commands (e.g. /start, /leech)
     await set_bot_commands(app)
 
-    # Start the application
-    await app.start()
-    await app.updater.start_polling()
-    await app.idle()
+    # Start polling and keep running
+    await app.run_polling()
 
 if __name__ == "__main__":
     asyncio.run(main())
