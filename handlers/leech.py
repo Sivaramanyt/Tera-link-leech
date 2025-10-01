@@ -50,13 +50,13 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
                     await update.message.reply_text(
                         f"You have reached your free leech limit.\nPlease verify to continue.\n{ver_link}\nTutorial: https://www.youtube.com/watch?v={TUT_VID}"
                     )
-                    return  # stop here until verification is done
+                    return
 
         text = update.effective_message.text or ""
         parts = text.split(maxsplit=1)
         if len(parts) < 2:
             await update.message.reply_text(
-                "Usage: `\\leech <terabox_link>`\nSupports up to 120MB with Progress tracking\nRedirect handling enabled",
+                "**Usage:** `\\leech <terabox_link>`\nSupports up to 120MB with Progress tracking\nRedirect handling enabled",
                 parse_mode='Markdown'
             )
             return
@@ -72,9 +72,12 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         resolver = await get_resolver()
         try:
-            download_url, filename, filesize = await resolver.resolve_url(url)
+            file_meta = await resolver.resolve(url)
+            download_url = file_meta.url
+            filename = file_meta.name
+            filesize = file_meta.size
         finally:
-            await cleanup_resolver()  # <== FIXED: no argument passed
+            await cleanup_resolver()
 
         if not download_url:
             await status.edit_text("Link resolution failed or expired link.")
@@ -109,7 +112,6 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
                 await stream_upload_media(context.bot, chat_id, f, filename, actual_size, avg_speed)
 
             if PRIVATE_CHANNEL_ID:
-                # Forward uploaded file to private channel
                 with open(temp_path, "rb") as f2:
                     await context.bot.send_document(
                         PRIVATE_CHANNEL_ID,
@@ -138,6 +140,5 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
             pass
 
 
-from telegram.ext import CommandHandler
 leech_handler = CommandHandler("leech", phase21_leech_handler)
-        
+            
