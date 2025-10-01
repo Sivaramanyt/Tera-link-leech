@@ -4,7 +4,6 @@ import os
 from telegram.ext import Application
 from handlers.start import start_handler
 from handlers.leech import leech_handler
-from handlers.verification import verify_handler  # Replace with your verification handler name
 from handlers.set_commands import set_bot_commands
 
 logging.basicConfig(
@@ -23,12 +22,11 @@ async def main():
 
     app = Application.builder().token(bot_token).build()
 
-    # Register handlers (must be instances, not functions)
+    # Register only working handlers
     app.add_handler(start_handler)
     app.add_handler(leech_handler)
-    app.add_handler(verify_handler)
 
-    # Set bot commands globally
+    # Set bot commands
     await set_bot_commands(app)
 
     # Start the bot
