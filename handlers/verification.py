@@ -13,7 +13,7 @@ SHORTLINK_API = os.environ.get("SHORTLINK_API", "139ebf8c6591acc6a69db83f200f228
 VERIFY_EXPIRE = int(os.environ.get('VERIFY_EXPIRE', 21600))
 IS_VERIFY = os.environ.get("IS_VERIFY", "True").lower() == "true"
 TUT_VID = os.environ.get("TUT_VID", "gojfsi/2")
-MONGO_URI = os.environ.get("MONGO_URI")
+MONGO_URI = os.environ.get("MONGODB_URI")
 
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI)
 db = client['terabox_bot']
