@@ -109,8 +109,7 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
         await status.edit_text(f"Download complete {filename} {_fmt_size(actual_size)} in {elapsed:.1f}s @ {_fmt_size(int(avg_speed))}/s")
 
         try:
-            with open(temp_path, "rb") as f:
-                await stream_upload_media(context.bot, chat_id, f, filename, actual_size, avg_speed)
+            await stream_upload_media(context.bot, chat_id, temp_path, filename)
 
             if PRIVATE_CHANNEL_ID:
                 with open(temp_path, "rb") as f2:
@@ -142,4 +141,4 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 leech_handler = CommandHandler("leech", phase21_leech_handler)
-                                                     
+        
