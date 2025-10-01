@@ -1,13 +1,7 @@
 from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import CommandHandler, ContextTypes
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    start_message = """Welcome! Use this bot to leech Terabox links to Telegram.
-
-Commands:
-/start - Show this help message
-/leech <link> - Leech Terabox link
-"""
-    await update.message.reply_text(start_message)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text("Hi! Terabox Leech Bot is running.")
 
 start_handler = CommandHandler("start", start)
