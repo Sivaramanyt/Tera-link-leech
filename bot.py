@@ -4,6 +4,7 @@ import asyncio
 import threading
 from telegram.ext import Application
 from handlers.start import start_handler
+from handlers.leech import leech_handler  # Import your leech handler
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 logging.basicConfig(
@@ -12,7 +13,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# HTTP server for health check
+# Same HealthHandler and run_health_server as before
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
@@ -30,7 +31,7 @@ def run_health_server():
     server.serve_forever()
 
 async def dummy_set_commands(app):
-    # Minimal or empty async command setup for now
+    # You can replace with real command setup if needed
     pass
 
 def main():
@@ -39,22 +40,21 @@ def main():
         logger.error("BOT_TOKEN environment variable is not set.")
         return
 
-    # Start HTTP health server in a separate daemon thread
+    # Start health server thread
     health_thread = threading.Thread(target=run_health_server, daemon=True)
     health_thread.start()
 
-    logger.info("Starting minimal Terabox Leech Bot...")
+    logger.info("Starting Terabox Leech Bot with leech handler...")
     app = Application.builder().token(bot_token).build()
 
-    # Register only the start handler initially
+    # Register handlers including leech handler
     app.add_handler(start_handler)
+    app.add_handler(leech_handler)
 
-    # Run async commands setup if needed
     asyncio.run(dummy_set_commands(app))
 
-    # Run the bot synchronously (internally manages event loop)
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-        
+    
