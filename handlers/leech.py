@@ -95,14 +95,14 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
         await status.edit_text(f"Downloading {filename} {_fmt_size(filesize)}")
 
-        # Corrected fetch_to_temp call:
+        start_time = time.time()
         temp_path, _ = await fetch_to_temp(file_meta, on_progress=status.edit_text)
+        elapsed = time.time() - start_time
 
         if not temp_path:
             await status.edit_text("Download failed or timed out.")
             return
 
-        elapsed = time.time() - temp_path.stat().st_ctime  # Or use time diff for download duration
         actual_size = os.path.getsize(temp_path)
         avg_speed = actual_size / elapsed if elapsed > 0 else 0
 
@@ -142,4 +142,4 @@ async def phase21_leech_handler(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 leech_handler = CommandHandler("leech", phase21_leech_handler)
-        
+                                                     
