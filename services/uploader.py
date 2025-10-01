@@ -1,3 +1,4 @@
+```python
 import os
 import logging
 import psutil
@@ -62,17 +63,18 @@ async def stream_upload_media(context, chat_id: int, file_path: str, filename: s
     with StreamingFileReader(file_path) as stream:
         try:
             if is_video:
-                await context.bot.send_video(chat_id, video=stream, caption=caption, supports_streaming=True)
+                # Modified this line to explicitly use keyword arguments for all parameters
+                await context.bot.send_video(chat_id=chat_id, video=stream, caption=caption, supports_streaming=True)
             elif is_audio:
-                await context.bot.send_audio(chat_id, audio=stream, caption=caption)
+                await context.bot.send_audio(chat_id=chat_id, audio=stream, caption=caption)
             elif is_photo and file_size < 10 * 1024 * 1024:
-                await context.bot.send_photo(chat_id, photo=stream, caption=caption)
+                await context.bot.send_photo(chat_id=chat_id, photo=stream, caption=caption)
             else:
-                await context.bot.send_document(chat_id, document=stream, caption=caption)
+                await context.bot.send_document(chat_id=chat_id, document=stream, caption=caption)
 
             logger.info("✅ Upload successful")
             return True
         except Exception as e:
             logger.error(f"❌ Upload failed: {e}")
             raise
-    
+```
